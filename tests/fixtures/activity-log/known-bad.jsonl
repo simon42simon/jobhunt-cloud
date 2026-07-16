@@ -1,0 +1,5 @@
+{"ts":"2026-07-04T00:00:00.000Z","kind":"run","runId":"fx-stale","routine":"work-ticket","label":"fixture: 36h-old orphan run","jobId":"t-9","batchId":null,"status":"running"}
+{"ts":"2026-07-05T11:00:00.000Z","kind":"delegation","routine":"test-engineer","label":"fixture: idless running delegation","status":"running"}
+{"ts":"2026-07-05T11:05:00.000Z","kind":"delegation","routine":"chief-vibes-officer","label":"fixture: routine is not a role id","status":"done"}
+this line is torn json {
+{"kind":"note","routine":"cto","label":"fixture: missing ts","status":"done"}

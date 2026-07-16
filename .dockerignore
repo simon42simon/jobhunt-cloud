@@ -1,0 +1,40 @@
+# RC-3 / SIM-87 I8 - keep the build context lean AND keep local secrets / live data
+# out of the image. (The builder still runs `npm ci` + `npm run build` from the
+# copied source; node_modules/dist are rebuilt inside the image.)
+
+# rebuilt in the image
+node_modules
+dist
+**/node_modules
+
+# secrets / local overrides - NEVER in an image
+.env
+.env.local
+config.local.json
+cookies.txt
+demo/forbidden.local.json
+
+# live machine-written board data (ADR-023 zone; also gitignored) - never in an image
+docs/tasks.yaml
+docs/requests.yaml
+docs/activity-log.jsonl
+docs/usage-telemetry.jsonl
+docs/notify-state.json
+docs/job-chats.json
+docs/attachments/
+
+# runtime output + logs
+ops/outputs/
+ops/autobuild-log-*.txt
+*.log
+
+# vcs / tooling / tests - not needed at runtime
+.git
+.github
+.claude
+.ua
+.understand-anything
+tests
+**/*.test.js
+**/*.test.ts
+.DS_Store

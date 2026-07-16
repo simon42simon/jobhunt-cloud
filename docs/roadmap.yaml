@@ -1,0 +1,268 @@
+product: Jobhunt Command Center
+# version/updated below are an AUTHORED FALLBACK ONLY. The Roadmap board DERIVES
+# the header product version + date from the latest released changelog entry, and
+# each phase's `status` from its linked portfolio milestones (roadmap_phase) + the
+# changelog releases (ADR-012, src/lib/roadmapDerive.ts) - so the view cannot
+# drift. Do NOT hand-maintain a phase `status` expecting the board to honor it;
+# the derived value wins. The stored `status` is used only as the fallback for a
+# phase with NO linked milestones and NO released version (e.g. phase-1, backlog).
+version: 0.23.0
+updated: 2026-07-05 14:16 ET
+# status: shipped | in_progress | planned | later  (AUTHORED FALLBACK; derived on the board - see ADR-012)
+phases:
+  - id: phase-1
+    title: Phase 1 - Command Center
+    status: shipped
+    version: 0.1.0
+    shipped: 2026-06-29
+    summary: >-
+      Replace the Obsidian table with a real visual control surface, fully in
+      sync with the vault files.
+    items:
+      - { text: "File-bridge server: read all job files, surgical frontmatter writes", done: true }
+      - { text: "Create job + open generated files (CV/cover/posting) in OS app", done: true }
+      - { text: "Live reload via chokidar + SSE", done: true }
+      - { text: "Kanban board by status with drag-to-change-status", done: true }
+      - { text: "Sortable / searchable / filterable table", done: true }
+      - { text: "Detail drawer: edit fields, read lead-with + gaps + body", done: true }
+      - { text: "Keyboard shortcuts + weekly-target ring", done: true }
+      - { text: "Product hub: roadmap board, blueprint/SOP, governance, changelog", done: true }
+      - { text: "Task board (granular dev backlog) + quality/testing constitution", done: true }
+
+  - id: quality
+    title: Quality, UX & Docs
+    status: shipped
+    version: 0.5.0
+    shipped: 2026-06-30
+    summary: >-
+      Make the product trustworthy and self-documenting: tests, a release gate,
+      visible process, and UX guardrails.
+    items:
+      - { text: "Vitest suite (36 tests) + npm run check release gate (typecheck + tests)", done: true }
+      - { text: "server/lib.js extracted; app importable for integration tests", done: true }
+      - { text: "Status-change popup: shows trigger + impact on drag / table change", done: true }
+      - { text: "Workflow visualization (feature lifecycle + release pipeline)", done: true }
+      - { text: "Routine runner: concurrency cap + run-history pruning", done: true }
+      - { text: "UI/UX expert subagent + documented UI/UX review standard", done: true }
+      - { text: "Phone access (LAN) + responsive foundations (Galaxy Fold cover/inner) + SETUP.md", done: true }
+      - { text: "Accessibility: Esc closes all overlays + global focus-visible rings", done: true }
+      - { text: "Thorough Fold responsive polish (ui-ux-expert) - in progress", done: false }
+
+  - id: phase-2
+    title: Phase 2 - Progress & Analytics
+    status: shipped
+    version: 0.7.0
+    shipped: 2026-06-30
+    summary: >-
+      Answer "how is the search actually going?" and "what needs me today?" at a
+      glance.
+    items:
+      - { text: "Funnel: pipeline by stage", done: true }
+      - { text: "Velocity: applications submitted per week", done: true }
+      - { text: "Interview / offer rates (of applied)", done: true }
+      - { text: "Breakdown by track and by sector", done: true }
+      - { text: "Needs-attention panel: overdue + deadlines <=3 days + stale drafts", done: true }
+      - { text: "Optional derived SQLite cache (rebuilt from files, never the truth)", done: false }
+
+  - id: phase-3
+    title: Phase 3 - Agent Command Surface
+    status: in_progress
+    summary: >-
+      The dashboard is the front-end for the existing agents/routines: it triggers
+      them and reflects their output. Each mode reads/writes the same files; none
+      auto-submits. Routine runner, in-app Discovery, batch-draft, Discovery triage,
+      inline gaps editor, and watcher hardening shipped; Apify connector, ingest,
+      evaluate, and legitimacy-check are next.
+    items:
+      - { text: "In-app trigger of routines from a card: first-draft-job, finalize-job", done: true }
+      - { text: "Run discover-jobs from the board / Discovery view", done: true }
+      - { text: "In-app Discovery view (off Excel): list finds, pursue -> lead, dedup flag", done: true }
+      - { text: "Batch-draft: fan out first-draft over queued jobs (bounded by the cap)", done: true }
+      - { text: "Apify connector for mainstream boards (Indeed/Google Jobs) - needs token", done: false }
+      - { text: "Ingest: paste a posting URL/JD -> agent extracts -> record + full JD saved", done: false }
+      - { text: "Evaluate: weighted A-F rubric vs master facts (harvest career-ops rubric)", done: false }
+      - { text: "Legitimacy check: ghost-job / scam flag (career-ops 'Block G')", done: false }
+      - { text: "Follow-up drafts + STAR interview-prep accumulation", done: false }
+      - { text: "Per-job activity timeline for richer analytics", done: false }
+      - { text: "Discovery triage: Skip / Maybe + POST /api/discovery/decide + discovery.py decide", done: true }
+      - { text: "Inline gaps editor in job drawer: PUT /api/jobs/:id/file, restricted to gaps and job-description files", done: true }
+      - { text: "File-bridge watcher hardened: error handler + ignore Office temp/lock files", done: true }
+
+  - id: company-os
+    title: Company OS - the product runs itself
+    status: in_progress
+    summary: >-
+      Make the product describe and operate itself as a real org: an explicit AI
+      product-dev team and the recursive operating model that runs it. The Team page,
+      the agent org, the Execution pillar (portfolio + Projects view), the
+      daily-tool usability + accessibility overhaul, the Confluence-style
+      Product hub redesign, and connected execution (org <-> projects/milestones/
+      tasks <-> activity, cross-linked both ways) are live; the Fold responsive
+      review of Team/Projects is still in progress.
+    items:
+      - { text: "Team page (Product hub): org chart + agent roster, from docs/agents.yaml (rendered concise)", done: true }
+      - { text: "8 reusable agents + CTO orchestrator + human owner, defined in ~/.claude/agents/", done: true }
+      - { text: "Recursive Manager Operating System: 7-step loop + shadow mode (docs/management-philosophy.md)", done: true }
+      - { text: "GET /api/agents read-only endpoint + integration tests (npm run check green, 52 tests)", done: true }
+      - { text: "Execution pillar: docs/portfolio.yaml + GET /api/portfolio + 7 optional task fields + ADR-006 + pm-conventions.md", done: true }
+      - { text: "Projects view (Product hub): project -> milestone -> task tree with milestone progress", done: true }
+      - { text: "Daily-tool usability + accessibility overhaul: status friction/undo, Board archive, needs-attention strip, table/insights, focus trap, 44px targets, WCAG AA contrast", done: true }
+      - { text: "ui-ux-expert responsive review of the Team + Projects pages (Fold cover/inner) before release", done: false }
+      - { text: "Activity / Delegation log: GET /api/activity + Activity tab; in-app runs captured (SubagentStop hook is a user settings.json step)", done: true }
+      - { text: "Typed ticket board: type bug/feature/chore/spike, Triage column, labels, estimate, assignee, tickable checklists, type/status filters + 7 optional task fields on POST/PATCH", done: true }
+      - { text: "People & Enablement agent: roster audit (docs/agent-roster-audit.md), onboarding checklist (docs/agent-onboarding-checklist.md), model+effort rubric", done: true }
+      - { text: "Career Delivery agent group: job-search-scout, application-writer, interview-offer-coach", done: true }
+      - { text: "Weekly-enablement-review routine", done: true }
+      - { text: "Product hub redesign: grouped collapsible sidebar + content pane + breadcrumb, data-driven Docs tree (docs/*.md, routines/, briefs/) + filter box, GET /api/docs + generic path-safe GET /api/doc/*, responsive with a mobile drawer + focus trap", done: true }
+      - { text: "XSS hardening: MarkdownDoc renders marked output through DOMPurify before display", done: true }
+      - { text: "Connected execution: participant/involvement join model (src/lib/involvement.ts, pm-conventions.md section 9); Projects view shows owner/accountable + participant chips with milestone-first-class progress; Team view agent cards open a focus-trapped drawer of that agent's projects/tasks/activity; docs/tasks.yaml backfilled (24 tasks) with project/milestone/owner/delegated_by", done: true }
+      - { text: "Doc-browser taxonomy refined into 7 coherent groups (Product, Org & Agents, Routines, Reviews & Logs, Briefs & Debriefs, Releases, Docs)", done: true }
+      - { text: "First full weekly-enablement-review run against the live activity log; integrate-or-it-doesn't-count standing rule encoded", done: true }
+
+  - id: phase-exec-chatbot
+    title: Execution views, chatbot & review progress (v0.13.0 wave)
+    status: shipped
+    version: 0.13.0
+    shipped: 2026-07-02
+    summary: >-
+      The Projects and Tasks execution views redesigned to Linear / Asana / Jira
+      patterns, an in-app capture-and-delegate chatbot, and per-document review
+      progress - shipped as v0.13.0.
+    items:
+      - { text: "Projects + Tasks execution views redesigned: project chips on every card, a portfolio pulse header, active-vs-completed split, group-by-project swimlanes + project filter", done: true }
+      - { text: "Chatbot capture-and-delegate v1: global slide-over ('c'), focus-trapped; 'Queue it' files a Triage ticket via the task API, 'Queue & delegate now' is confirm-gated then fires the work-ticket routine", done: true }
+      - { text: "work-ticket backend routine: the runner's scope check generalized from job folders to tickets; a CTO agent runs against a ticket and updates status via PATCH (ADR-005 sandbox unchanged)", done: true }
+      - { text: "Reviews & Logs per-document progress table (DocTicketsPanel): per-doc recommendations -> linked tickets -> status, with a pending-decisions callout for untriaged recs", done: true }
+      - { text: "session-debrief routine: end-of-session recap / verify-nothing-at-risk / propagate-lessons / queue-next", done: true }
+
+  - id: phase-owner-feedback
+    title: Owner-feedback wave - notifications, chatbot loop, Jobs IA (v0.14.0 wave)
+    status: shipped
+    version: 0.14.0
+    shipped: 2026-07-03
+    summary: >-
+      An in-app notification feed (bell + slide-over panel), the chatbot grown
+      from capture-only into a capture -> CTO-assess -> delegate loop with
+      clipboard/file paste and a My-reports queue, the Board and Table folded
+      into one Jobs page, rule-based auto-close of expired jobs, and discovery
+      auto-prune before every discovery run - shipped as v0.14.0. All derived
+      from data the app already holds; all reversible.
+    items:
+      - { text: "Notification feed: GET /api/notifications + POST /api/notifications/read, derived from the durable activity log + task/portfolio diffs against a persisted baseline (one atomic notify-state.json, no push, no event store); bell in the TopBar + focus-trapped slide-over panel with per-event-type settings (ADR-007)", done: true }
+      - { text: "Chatbot My-reports queue + CTO assessment surfaced inline (chatbot label + latestCtoComment); a clipboard button and textarea file paste/drop ingest pasted/dropped content into the report", done: true }
+      - { text: "assess-ticket routine + append-only ticket comments API: every chatbot ticket auto-fires a comment-only CTO assessment recorded via PATCH /api/tasks/:id (append-a-comment only; ADR-005 ticket-scope addendum)", done: true }
+      - { text: "Jobs IA: Board + Table merged into one Jobs page with a segmented view switcher; the jobs table groups by status and sinks submitted/closed rows to the bottom", done: true }
+      - { text: "Rule-based auto-close of expired pre-application jobs: lead/queued/drafted past a real YYYY-MM-DD deadline -> status closed via the surgical frontmatter path (no agent, reversible)", done: true }
+      - { text: "Discovery auto-prune before discover-jobs: discovery.py prune MOVES dead rows into an Archive sheet (never deletes), best-effort and workbook-lock-tolerant (ADR-008)", done: true }
+      - { text: "TeamView equipped-skills chips per agent", done: true }
+      - { text: "Fix: BOM in job frontmatter silently hid jobs from the dashboard (2 jobs were invisible)", done: true }
+
+  - id: phase-ops-management
+    title: Operational management + hub hierarchy (v0.15.0 wave)
+    status: shipped
+    version: 0.15.0
+    shipped: 2026-07-03
+    summary: >-
+      The orchestration flow made visible: an Intake ledger records every
+      request (verbatim prompt -> CTO assessment -> the tasks/projects it
+      spawned, with live status); every project gains a PMBOK-grounded
+      operational block (Sponsor / Project Manager / RACI, with Responsible
+      derived from task owners, not stored); and the Product Hub sidebar is
+      rebuilt for a legible three-level hierarchy. Grounded in a signed-off
+      design (docs/research/2026-07-03-operational-management.md).
+    items:
+      - { text: "Intake ledger: docs/requests.yaml + GET/POST/PATCH /api/requests (verbatim prompt, source, CTO assessment, spawned tasks/projects); Intake view renders request -> assessment -> spawned work with live board status; 5 backfilled (ADR-009)", done: true }
+      - { text: "Operational-management fields per project: origin_request/sponsor/project_manager/raci{consulted,informed} on all 8 projects; Projects Operational Management block with Accountable = the top-level field and Responsible DERIVED from task owners, never a parallel store (ADR-010)", done: true }
+      - { text: "Product Hub sidebar rebuilt for hierarchy: domain divider + trailing caret (L1), primary items (L2), collapsible group chevrons (L3), lighter guided nested docs (L4); fixes the indentation-inversion bug + the near-invisible collapse triangles", done: true }
+      - { text: "Build-vs-buy research (Hostinger / Hermes) - verdict skip all: nothing clears the local-first data contract; validates the on-machine routine-runner architecture", done: true }
+      - { text: "Delivered in v0.16.0 (part 2): full stakeholder register + risk list per project (ADR-011); roadmap status derived from portfolio milestones + changelog (ADR-012)", done: true }
+
+  - id: phase-ops-management-2
+    title: Operational-system part 2 + Projects UX (v0.16.0 wave)
+    status: shipped
+    version: 0.16.0
+    shipped: 2026-07-03
+    summary: >-
+      Part 2 of the operational-management system, and the owner's top-priority
+      Projects UX overhaul. Every project can carry a stakeholder register + risk
+      list (rendered only when present); the Projects view is rebuilt into a
+      Linear-style master-detail that fixes the render stall and the readability;
+      and the Roadmap now DERIVES phase status from linked portfolio milestones +
+      the changelog, so it cannot drift. The status and header version on this very
+      page are themselves derived.
+    items:
+      - { text: "Stakeholder register + risk list per project (ADR-011): optional stakeholders[]/risks[], severity DERIVED from likelihood x impact, rendered only when non-empty; prj-operational-system carries its real currency-drift risk", done: true }
+      - { text: "Projects view rebuilt to a Linear-style master-detail (list + detail pane, one-click select): fixes the renderer stall on the heavy view and the readability/density; preserves RACI + stakeholder/risk + progress", done: true }
+      - { text: "Roadmap status + product version DERIVED from portfolio milestones (roadmap_phase join) + the changelog, never hand-typed (ADR-012); a subtle 'derived' affordance marks computed status", done: true }
+      - { text: "Intake waves are first-class: each build wave filed as a tracked ticket linked to its request; prompt auto-capture keeps the ledger current", done: true }
+
+  - id: phase-binary-security-doctruth
+    title: First binary write-path, loopback-by-default and doc-truth (v0.17.0 wave)
+    status: shipped
+    version: 0.17.0
+    shipped: 2026-07-04
+    summary: >-
+      The app's first binary write-path (pasted-image attachments with a guarded
+      inline lightbox, ADR-014), the Express file bridge bound loopback-only by
+      default with LAN as an explicit opt-in (audit T1), and the chatbot capture
+      wired to write a linked intake record so the request -> assessment ->
+      spawned-task origin chain is complete in-app (D1 / ADR-009). Folded in from
+      the same unreleased window: a completed date across the three most-recent
+      surfaces (ADR-013), an advanced Job Tracker filter, the My-reports you/QA
+      attribution, the Fold-responsive Projects split, and the D4 / D6 / D11 fixes.
+      Cut behind two green release gates (QA GO, governance CLEAN), doc-true.
+    items:
+      - { text: "Image attach + preview + lightbox (ADR-014): paste/drop an allowlisted image (png/jpeg/gif/webp) -> in-memory pending thumbnail -> fail-soft upload after the task POST -> guarded inline lightbox viewer (never a download); POST /api/tasks/:id/attachments with 8 ordered guards + independent magic-byte sniff, content-addressed docs/attachments/<taskId>/<sha256>.<ext>, guarded reader - the app's FIRST binary write-path", done: true }
+      - { text: "Security (audit T1): app.listen binds config.serverHost || 127.0.0.1, so the unauthenticated write API is loopback-only by default and LAN is an explicit owner opt-in; DATA_CONTRACT.md discloses the bind posture (audit O-2)", done: true }
+      - { text: "Chatbot capture -> linked intake record (D1 / ADR-009): ChatCapture Queue-it also writes POST /api/requests (source chatbot, verbatim ask) linked to the spawned ticket, best-effort/fail-soft, completing the origin chain for in-app captures", done: true }
+      - { text: "Completed date across the 3 most-recent surfaces (ADR-013): a server-managed, unforgeable completed field on the task board; the Job Tracker and Projects view derive recency with no new stored field", done: true }
+      - { text: "Advanced multi-condition Job Tracker filter: JobFilterBar over a pure jobFilter.ts (AND/OR conditions over real Job fields with type-appropriate operators; completed is derived)", done: true }
+      - { text: "My-reports you/QA attribution + QA function stand-up: My reports unions owner chatbot reports (You) and qa-tester bug tickets (QA) via a pure reportSource() selector", done: true }
+      - { text: "Dev/infra: activity-log honesty (dangling run closed, lint category fix, lint:activity-log wired into npm run check) + toolchain upgrade vitest ^2 -> ^4.1.9 and vite ^6.4.3 (npm audit clean)", done: true }
+      - { text: "Fold responsive: Projects master-detail splits at lg (1024px), single-pane list-then-detail below; plus the D4 needs-attention dedup, D6 blank-title Add error, and D11 job-drawer edit-flush fixes", done: true }
+
+  - id: phase-discovery-sources
+    title: Discovery Sources console + triage inbox, telemetry & audit HIGHs (v0.18.0 wave)
+    status: shipped
+    version: 0.18.0
+    shipped: 2026-07-04
+    summary: >-
+      The Discovery page becomes a managed-source console + rebuilt triage
+      inbox: each employer or job board is a managed source in a native
+      app-managed YAML registry (ADR-016, not the xlsx) with crawl
+      instructions, cadence, DERIVED health status, per-source Run now and a
+      capped run history; a Sources <-> Finds toggle flips to a three-pane
+      keyboard-first triage inbox with saved views, undo-not-confirm,
+      bulk-select, and clickable provenance. Shipped alongside usage-journey
+      telemetry v1 (ADR-017), age-based needs-attention buckets for
+      deadline-less jobs (audit F1), the SSE consolidation that retires the
+      client polls (audit F1-F3), and the finalize-ready queue (audit #1
+      lever). Registry unification (t-1783183576537, QA's J10 release
+      blocker) closed at the wire: the xlsx global sweep is retired for a
+      run-all-due fan-out that stamps per-source lastRunAt honestly. The
+      remaining v2 items are deferred and tracked, not dropped: a real
+      background scheduler, Maybe snooze-until, and the decide 'clear' verb
+      (t-1783178044080).
+    items:
+      - { text: "Discovery Sources console (ADR-016): docs/discovery-sources.yaml native registry (atomic safe path, NOT the xlsx) + GET/POST/PATCH/DELETE /api/discovery/sources; status/due/nextRunAt/jobCount/newSinceVisit/pursuedPct DERIVED never stored (precedence paused > running > failed > never-run > stale > due > healthy); SourceCard grid + status pill + sparkline + lead yield, SourceDetailDrawer (5 tabs), SourceFormDrawer", done: true }
+      - { text: "Per-source Run now + run history: POST /api/discovery/sources/:id/run launches discover-jobs scoped to one source; optimistic running record flipped by the runner's close path to terminal outcome + durationMs + leadsFound/leadsNew; one run per source (409), cap degrades soft (429), history capped at 20", done: true }
+      - { text: "Rebuilt triage inbox (Finds): three-pane master-detail with saved views (New/Maybe/Pursued/All/Hidden), keyboard-first J/K + S/M/P auto-advance triage, undo-not-confirm (~6s toast), bulk-select with a pinned action bar, clickable source provenance; finds JOIN by stamped sourceId else name/aliases, with an honest unassigned bucket", done: true }
+      - { text: "Usage-journey telemetry v1 (ADR-017): POST /api/telemetry + summary endpoint over a local-only gitignored docs/usage-telemetry.jsonl (events-never-content by construction, server-stamped unforgeable ts); fail-soft J-tagged client instrumentation across 12 components (J1-J11); Usage hub panel + the PM-bound usage-insights routine (read-and-recommend only, at most 3 tickets)", done: true }
+      - { text: "Needs-attention age buckets (audit F1): stale-draft falls back to file age (>7d) for deadline-less drafts + a new stale-leads bucket for deadline-less lead/queued jobs; one-bucket-per-job precedence preserved (overdue > due-soon > stale-draft > stale-lead), chips read 'status Nd - no deadline'", done: true }
+      - { text: "SSE consolidation (audit F1-F3): typed server broadcasts (jobs-changed / run-finished / source-run-finished / tasks-changed) + ONE shared useEventStream client; bell/chat/batch/discovery polls retired to event-driven with conservative fallbacks; DiscoveryView is the single finds owner", done: true }
+      - { text: "Finalize queue (audit #1 lever): DERIVED gapsAnswered (gaps-note mtime strictly newer than the generated CV) + finalizeReady (drafted && hasCV && gapsAnswered), never stored; batch endpoint readiness guard (never auto-submits); ready-to-finalize chips + TopBar 'Finalize ready (N)' batch", done: true }
+      - { text: "Registry unification (t-1783183576537, QA J10 release blocker, PR #6): the xlsx-reading global sweep retired for POST /api/discovery/run-all-due - a fan-out of per-source runs over every DUE active source (concurrency-capped, stamp-at-launch, trigger 'all-due' provenance, prune moved over); write race fixed (sources reload inside readDiscovery); TopBar 'Discover due'; xlsx Config keeps Job Types + Filters only", done: true }
+      - { text: "v2 deferred - real background scheduler: v1 cadence is declarative + a DERIVED due flag; the model is shaped so a scheduler reads the same fields", done: false }
+      - { text: "v2 deferred - Maybe snooze-until: 'Maybe' as a real snoozed state with a resurface date, not just a saved view", done: false }
+      - { text: "decide 'clear' verb (t-1783178044080, shipped v0.23.0): persist undo of a New -> Skip/Maybe decision by writing an EMPTY Decision cell so the undo survives a reload", done: true }
+
+  - id: backlog
+    title: Later / Stretch
+    status: later
+    summary: Ideas parked until the core phases land.
+    items:
+      - { text: "Version control: git init + commit history + tags per release", done: true }
+      - { text: "Email classification -> suggested status changes you approve", done: false }
+      - { text: "Contacts & referrals linked to applications", done: false }
+      - { text: "Package as a one-click desktop app (Tauri)", done: false }
+      - { text: "Full-JD capture at discovery (addresses the JD-stub gap)", done: false }

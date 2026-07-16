@@ -1,0 +1,251 @@
+# SYNTHETIC TEST FIXTURE (tests/fixtures/board) - committed, never live data.
+# Built by ops/scripts/build-test-fixtures.mjs; the suites overlay this onto
+# their throwaway docs copy. Do not point the app here.
+columns:
+  - backlog
+  - todo
+  - in_progress
+  - done
+tasks:
+  - id: t-001
+    title: Set up Vitest + npm scripts
+    detail: >-
+      Add vitest + @vitest/ui as devDeps. Scripts: "test" (run once),
+      "test:watch", and "check" (typecheck + test). Config so server (node) and
+      src (jsdom) tests both run. Acceptance: `npm test` runs and reports 0/0.
+    epic: testing
+    project: prj-eng-pm-layer
+    owner: test-engineer
+    delegated_by: cto
+    priority: high
+    status: done
+    created: '2026-06-30'
+  - id: t-002
+    title: Extract pure server logic into server/lib.js
+    detail: >-
+      Move normDate, yamlScalar, updateFrontmatter, parseLeadWith,
+      sanitizeForPath, isInsideJobsDir out of index.js into a side-effect-free
+      module so they are importable by tests without starting the server.
+      index.js imports from lib. Acceptance: server still boots, endpoints work.
+    epic: testing
+    project: prj-eng-pm-layer
+    owner: software-architect
+    delegated_by: cto
+    priority: high
+    status: done
+    created: '2026-06-30'
+  - id: t-003
+    title: Unit test - updateFrontmatter (the load-bearing write)
+    detail: >-
+      Cases - replace an existing scalar line; insert a missing key before the
+      closing ---; delete a key when value is null/empty; ONLY the targeted line
+      changes (body byte-identical); refuses a file with no frontmatter. This is
+      the function that touches the user's vault, so it must be airtight.
+    epic: testing
+    project: prj-eng-pm-layer
+    owner: test-engineer
+    delegated_by: cto
+    priority: high
+    status: done
+    created: '2026-06-30'
+  - id: t-004
+    title: Unit test - normDate
+    detail: >-
+      Date-only string stays literal (2026-06-23); a JS Date -> YYYY-MM-DD via
+      UTC parts; non-date text ("1-yr contract") passes through; null/empty ->
+      null. Guards the timezone-shift bug fixed in v0.1.0 from regressing.
+    epic: testing
+    project: prj-eng-pm-layer
+    owner: test-engineer
+    delegated_by: cto
+    priority: medium
+    status: done
+    created: '2026-06-30'
+  - id: t-1783042256172
+    title: >-
+      Ticket comments + assess-ticket routine: CTO assessment on every chatbot
+      ticket
+    detail: >-
+      Owner request (2026-07-02): "when I submitted, I want CTO to comment on it
+      after checking the content and answer with the assessment and the plan to
+      address it including the subtask."
+
+
+      CTO assessment: This is the missing feedback half of the
+      capture-and-delegate chatbot (docs/chatbot-scoping.md). Two pieces: a
+      comments field on tasks, and an assess-only routine that fires on
+      submission.
+
+
+      Plan / subtasks:
+
+      1. Data model: add comments: [{ author, ts, body }] to task records in
+      docs/tasks.yaml; extend POST/PATCH /api/tasks (applyTaskFields) with an
+      append-comment path; validate shape; tests.
+
+      2. New "assess-ticket" routine in ROUTINES (scope: "ticket", like
+      work-ticket): spawns the headless CTO to READ the ticket + relevant
+      context and write back an assessment comment (verdict, plan, subtasks,
+      suggested owner/priority) via PATCH /api/tasks/:id - comment-only, it does
+      NOT execute the work (that stays work-ticket, opt-in).
+
+      3. Auto-fire assess-ticket from ChatCapture after "Queue it" (visible in
+      the run panel, stoppable, degrades gracefully at the concurrency cap -
+      ticket is queued either way).
+
+      4. Disclose in DATA_CONTRACT.md / governance.md alongside work-ticket
+      (same ADR-005 sandbox; free-typed text driving a read+comment agent).
+
+
+      Acceptance: filing a chatbot ticket produces, within one run, a structured
+      CTO assessment comment on that ticket, visible on the Tasks board and in
+      the chat panel queue.
+    epic: product
+    owner: software-architect
+    delegated_by: cto
+    status: done
+    priority: high
+    type: feature
+    labels:
+      - chatbot
+    created: '2026-07-03'
+    comments:
+      - author: cto
+        ts: '2026-07-03T02:10:00.479Z'
+        body: >-
+          Server half SHIPPED and verified (this very comment is written through
+          the new append-only comments API - client ts ignored, history
+          unforgeable, no wholesale replace by design). assess-ticket routine
+          registered (scope: ticket, comment-only by charter, same sandbox; 5
+          tests) + disclosures in DATA_CONTRACT/governance. REMAINING for
+          frontend (wave 2): ChatCapture fires api.runRoutine('assess-ticket',
+          id) after Queue it, and the board/panel render comments. Stays
+          in_progress until then.
+      - author: cto
+        ts: '2026-07-03T12:41:29.196Z'
+        body: >-
+          Wave-2 dispatch 2026-07-03: server half stays shipped (append-only
+          comments API + assess-ticket routine). Remaining frontend half
+          dispatched to frontend-engineer in the ChatCapture bundle - auto-fire
+          api.runRoutine(assess-ticket, id) after Queue it, and render
+          task.comments (CTO verdicts) in the panel. In_progress.
+      - author: cto
+        ts: '2026-07-03T15:09:05.916Z'
+        body: >-
+          Done - both halves complete. Server append-only comments API +
+          assess-ticket routine (earlier) and now the frontend: ChatCapture
+          auto-fires api.runRoutine(assess-ticket, id) after Queue it (surfaced
+          in RunPanel; 429 degrades softly, review-confirmed) and renders
+          task.comments CTO verdicts in the queue. Gate green (268). Closing.
+  - id: t-1783097277925
+    comments:
+      - author: cto
+        ts: '2026-07-03T16:47:57.925Z'
+        body: >-
+          Filed as the first demonstration of the very loop it describes: this
+          ticket IS the recorded intake for the owner's 2026-07-03 request.
+          Status todo pending the owner's where-it-lives decision;
+          recommendation is a dedicated Requests/Intake ledger (option A).
+      - author: cto
+        ts: '2026-07-03T16:57:22.146Z'
+        body: >-
+          Folded into the larger Operational management system initiative
+          t-1783097778589 as its Initiating component (request -> charter). Not
+          being built narrowly; the intake-ledger schema will be designed
+          together with the stakeholder/PM/RACI model in the Phase-0 research
+          spike so they share ONE coherent data model rather than a parallel
+          store. Staying todo pending that design + owner sign-off.
+      - author: cto
+        ts: '2026-07-03T17:37:37.130Z'
+        body: >-
+          Phase 1 backend build dispatched to software-architect: the intake
+          ledger (docs/requests.yaml + /api/requests) and the project PM/RACI
+          fields are built TOGETHER per the signed-off design
+          (docs/research/2026-07-03-operational-management.md), so they share
+          one data model. In_progress.
+      - author: cto
+        ts: '2026-07-03T18:20:39.553Z'
+        body: >-
+          DONE + live-verified. Intake view (Product hub -> Delivery -> Intake)
+          renders all 5 requests newest-first with SESSION/CHATBOT source chips;
+          expanding a row shows the VERBATIM prompt, the CTO assessment, and
+          every spawned task/project with its LIVE status pill read off the
+          board (verified: this very request shows its verbatim text + the
+          [feature] Intake ledger task at In Progress). Backend /api/requests
+          live after the server restart. The 'prompt table' the owner asked for
+          is real. Closing.
+    title: >-
+      [feature] Intake ledger: make the request → CTO assessment →
+      tasks/projects flow visible
+    detail: >-
+      Owner request (2026-07-03): "I still cannot see how the prompt is
+      received, how CTO break down, how task and projects are generated, etc.
+      This whole flow should be recorded. IDK where - tasks? projects? prompt
+      table?"
+
+
+      --- CTO assessment ---
+
+      Confirmed gap, and the right instinct: a 'prompt table' is the missing TOP
+      of the chain. Today the flow is only PARTIALLY recorded, in scattered
+      places:
+
+      - Chatbot-submitted prompts -> one Task (label 'chatbot') + the CTO
+      verdict as a task COMMENT (assess-ticket routine), shown in ChatCapture
+      'My reports'. Thin: it shows the ticket, not the request-to-outputs
+      lineage, and one request can spawn many tasks / a project that a single
+      task cannot represent.
+
+      - Prompts typed straight to the CTO in the terminal session (like THIS
+      one) are NOT captured as any first-class record at all - they only become
+      visible if the CTO manually files a ticket. The raw prompt, the breakdown
+      reasoning, and which tasks/projects it spawned are smeared across the task
+      detail text, comments, the activity log, and briefs. That is exactly why
+      it 'cannot be seen'.
+
+
+      The fix is a first-class Request/Intake record: verbatim prompt + source +
+      timestamp + CTO assessment (verdict/plan) + spawned:{tasks:[ids],
+      projects:[ids]}. It is the origin node the current model lacks (a task is
+      an OUTPUT, not the REQUEST). Rendering it as a chain (Prompt -> Assessment
+      -> spawned Tasks/Projects with live status -> delegation) makes the whole
+      orchestration loop legible.
+
+
+      --- Plan / subtasks ---
+
+      1. software-architect: new app-managed store docs/requests.yaml + GET/POST
+      /api/requests (verbatim text field, NOT id-sanitized), atomic write via
+      writeFileAtomic; a request carries spawned task/project ids; POST
+      /api/tasks optionally accepts requestId to auto-link. Tests +
+      DATA_CONTRACT disclosure.
+
+      2. frontend-engineer: an 'Intake' (Requests) view - each request row
+      expands to show verbatim prompt, CTO assessment, and the live status of
+      every spawned task/project; chatbot 'My reports' becomes a lens over the
+      same store.
+
+      3. Protocol (people-enablement + this memory): extend the standing 'every
+      ask -> filed ticket' rule to 'every ask -> filed INTAKE record first, then
+      link the tasks/projects it spawns' so direct-session prompts stop being
+      invisible.
+
+      4. Optional: a SubagentStop/session hook auto-appends delegation edges so
+      the chain fills without manual linking.
+
+
+      --- Open decision (routed to owner) ---
+
+      WHERE it lives + how much to build now: (A) dedicated Requests/Intake
+      ledger [CTO recommendation], (B) fold into tasks as parent/child, (C)
+      promote to projects. Awaiting owner steer before build.
+    epic: company-os
+    owner: software-architect
+    delegated_by: cto
+    status: done
+    priority: high
+    type: feature
+    labels:
+      - company-os
+      - intake
+    created: '2026-07-03'

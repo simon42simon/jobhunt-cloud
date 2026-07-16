@@ -1,0 +1,5 @@
+{"ts":"2026-07-04T09:00:00.000Z","kind":"run","runId":"fx-orphan","routine":"work-ticket","label":"fixture: stale orphan (27h before frozen now)","jobId":"t-8","batchId":null,"status":"running"}
+{"ts":"2026-07-05T10:00:00.000Z","kind":"run","runId":"fx-closed","routine":"assess-ticket","label":"fixture: properly paired run","jobId":"t-7","batchId":null,"status":"running"}
+{"ts":"2026-07-05T10:05:00.000Z","kind":"run","runId":"fx-closed","status":"done","exitCode":0,"batchId":null}
+{"ts":"2026-07-05T11:40:00.000Z","kind":"run","runId":"fx-live-1","routine":"first-draft-job","label":"fixture: in-flight, 20m before frozen now","jobId":"job-2","batchId":null,"status":"running"}
+{"ts":"2026-07-05T11:58:00.000Z","kind":"run","runId":"fx-live-2","routine":"first-draft-job","label":"fixture: concurrent in-flight, 2m before frozen now","jobId":"job-3","batchId":null,"status":"running"}

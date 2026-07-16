@@ -1,0 +1,982 @@
+# Project portfolio (hand-edited). The Execution pillar's source of truth.
+# Rendered in the app: Product hub -> Projects. Read-only endpoint: GET /api/portfolio.
+#
+# projects[] group work by department (a group id in agents.yaml), with an owner
+# (an agent/role id) and an accountable manager (a role id). milestones[] belong to
+# a project and may optionally pin to a roadmap.yaml phase. References point UP
+# (task -> milestone -> project); referential integrity is a read/test invariant,
+# not enforced on write, so a yet-to-exist ref never blocks a save.
+version: 1
+updated: '2026-07-10'
+
+projects:
+  - id: data-schema-discovery-v2
+    name: Data Schema v1 + Discovery Sources v2
+    department: engineering
+    owner: software-architect
+    accountable: cto
+    goal: >-
+      Two waves, owner-sequenced (r-1783197650888). W1: publish the org's
+      first data schema doc (docs/data-schema.md - every entity, field,
+      writer, relation; re-versioned with every release via a governance.md
+      gate) and audit/reconcile the live data against the code contracts.
+      W2, built on W1's schema decisions: Discovery Sources console v2 -
+      group sources by Job Track, per-source cadence editing, last-run +
+      derived next-due visibility, and a scrape contract that guarantees
+      every lead carries the Job-required fields (direct posting URL,
+      deadline). W3 (owner-added mid-wave, r-1783198113754): the
+      instruction-proposal loop - owner comments on a source's crawl
+      instructions, scout proposes updated instructions, owner
+      approves/rejects with reason; sources authored from a starting link
+      only. Plus scout work: Ontario higher-ed aggregator added + source
+      portfolio rationalized against it (r-1783198184642, r-1783198244241).
+      Tickets t-1783197650912 / ...929 / ...957 / ...981 / t-1783198113775 /
+      t-1783198184661.
+    status: done
+    created: '2026-07-04'
+    origin_request: r-1783197650888
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [ui-ux-expert, governance-auditor, job-search-scout]
+      informed: [owner, release-manager]
+
+  - id: ops-conversion-week-2026-07
+    name: Conversion & Cadence Week (operate the funnel)
+    department: career-delivery
+    owner: cto
+    accountable: cto
+    goal: >-
+      Operate the shipped machinery for a week instead of building: the owner
+      reviews and submits the finalize-ready queue in BatchPanel batches
+      (deadline-within-4-days jobs first; the CTO sequences and watches, never
+      submits), and the weekly discovery cadence restarts via per-source Run
+      now on the top due sources (t-1783192095724). Owner-paired remainder:
+      registry unification t-1783183576537 waits for a 30-minute owner
+      session; usage-insights runs next week once telemetry accumulates.
+    status: in_progress
+    created: '2026-07-04'
+    origin_request: r-1783191962622
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [job-search-scout, product-manager]
+      informed: [owner]
+
+  - id: usage-telemetry
+    name: Usage-Journey Telemetry (Company OS instrumentation)
+    department: engineering
+    owner: software-architect
+    accountable: cto
+    goal: >-
+      Instrument the app to record the owner's critical movements locally
+      (events, never content; local-only append-only JSONL, disclosed in the
+      data contract), then close the loop - a bound usage-insights routine
+      learns from the record and files improvement recommendations as tickets
+      into the normal triage -> assess -> delegate flow. Makes the
+      user-journeys doc measurable (events tagged with J-ids).
+    status: done
+    target: v0.19.0
+    created: '2026-07-04'
+    origin_request: r-1783183576836
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [security-privacy-guardian, product-manager]
+      informed: [owner]
+
+  - id: discovery-sources
+    name: Discovery Sources (Channels)
+    department: engineering
+    owner: software-architect
+    accountable: cto
+    goal: >-
+      Turn the Discovery page from a flat, read-only finds table into a
+      first-class managed-source console - each employer/job board a source with
+      its own scrape instructions, cadence, computed health, and lead yield -
+      plus a full triage inbox for the finds it produces. Model: Sources -> Leads
+      -> Pipeline (the Jobs board is the pipeline layer). Grounded in lead-gen CRM
+      + data-connector UX research; owner-approved mockup.
+    status: done
+    target: v0.18.0
+    created: '2026-07-04'
+    origin_request: r-1783162509679
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [ui-ux-expert, security-privacy-guardian]
+      informed: [owner]
+
+  - id: prj-eng-pm-layer
+    name: PM / Execution Layer
+    department: engineering
+    owner: software-architect
+    accountable: cto
+    goal: >-
+      Build the PM / Execution layer so projects, milestones, and tasks are
+      first-class in the app and every piece of dev work traces up to a milestone.
+    status: done
+    target: v0.9.0
+    created: '2026-06-30'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-company-os-agent-org
+    name: Company OS - AI Agent Org
+    department: leadership
+    owner: people-enablement
+    accountable: cto
+    goal: >-
+      Stand up the product's own AI agent organization (Team page, org chart,
+      recursive Manager Operating System, and the People & Enablement plus
+      Career Delivery agent groups) so the product describes and operates
+      itself as a real org.
+    status: done
+    target: v0.10.0
+    created: '2026-06-30'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-daily-tool-usability-a11y
+    name: Daily-tool Usability and Accessibility Overhaul
+    department: design
+    owner: ui-ux-expert
+    accountable: cto
+    goal: >-
+      Remove day-to-day friction from the Board, Table, Discovery, and drawer
+      surfaces and bring the app to WCAG AA so it is comfortable to run the job
+      hunt from, on desktop and the Fold.
+    status: done
+    target: v0.9.0
+    created: '2026-06-30'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-ticket-board-activity-log
+    name: Ticket Board and Activity/Delegation Log
+    department: engineering
+    owner: frontend-engineer
+    accountable: cto
+    goal: >-
+      Turn the flat task list into a Linear-style ticket board and add an
+      Activity feed so dev work and agent delegations are visible and
+      traceable in the app.
+    status: done
+    target: v0.10.0
+    created: '2026-07-01'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-discovery-triage-file-bridge
+    name: Discovery Triage and File-bridge Reliability
+    department: engineering
+    owner: software-architect
+    accountable: cto
+    goal: >-
+      Let Skip/Maybe decisions and gaps edits happen in the app without opening
+      Excel or Word, and make the file-bridge watcher survive real Windows
+      file-lock conditions instead of crashing the server.
+    status: done
+    target: v0.10.0
+    created: '2026-07-01'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-product-hub-redesign
+    name: Product Hub Redesign (Confluence-style Doc Management)
+    department: engineering
+    owner: frontend-engineer
+    accountable: cto
+    goal: >-
+      Replace the flat 8-tab Product hub with a grouped sidebar, content pane,
+      and breadcrumb over a data-driven docs tree, so every markdown doc
+      (including briefs) is discoverable without hunting through tabs.
+    status: done
+    target: v0.10.1
+    created: '2026-07-01'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-connected-execution
+    name: Connected Execution, Doc Taxonomy and Enablement Review
+    department: engineering
+    owner: frontend-engineer
+    accountable: cto
+    goal: >-
+      Make the Company OS coherent: cross-link the org (agents) with execution
+      (projects / milestones / tasks) and the activity feed so participation is
+      visible both ways, refine the doc-browser taxonomy, and run the first full
+      weekly enablement review. Shipped as v0.11.0. Chartered retroactively to
+      close the ticketing gap (pm-conventions section 10).
+    status: done
+    target: v0.11.0
+    created: '2026-07-01'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-product-hub-ia-v2
+    name: Product Hub IA v2 - Structured Views and Consolidated Nav
+    department: engineering
+    owner: frontend-engineer
+    accountable: cto
+    goal: >-
+      Evolve the Product hub from a flat sidebar of raw-markdown doc groups into
+      a consolidated four-domain navigation with structured, clickable index
+      views for Reviews & Logs, Briefs & Debriefs, and Releases, an employee /
+      onboarding page per agent, and addressed-vs-not tracking that reuses the
+      ticket board (a review recommendation becomes a ticket; addressed == a
+      ticket done), never a parallel status store. Design: docs/product-hub-ia-v2.md.
+    status: done
+    target: v0.12.0
+    created: '2026-07-01'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [ui-ux-expert]
+      informed: [owner]
+
+  - id: prj-exec-views-chatbot
+    name: Execution Views, Chatbot & Review Progress
+    department: engineering
+    owner: frontend-engineer
+    accountable: cto
+    goal: >-
+      Redesign the Projects and Tasks execution views to Linear / Asana / Jira
+      patterns, add an in-app capture-and-delegate chatbot (with a backend
+      work-ticket routine), and surface per-document review progress - so
+      delivery work is legible and a passing thought becomes a triaged,
+      optionally-delegated ticket without leaving the app. Shipped as v0.13.0.
+    status: done
+    target: v0.13.0
+    created: '2026-07-02'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+
+  - id: prj-owner-feedback-wave
+    name: Owner-feedback Wave - Notifications, Chatbot Loop, Jobs IA
+    department: engineering
+    owner: frontend-engineer
+    accountable: cto
+    goal: >-
+      Act on the owner's feedback: an in-app notification feed (bell + slide-over,
+      derived from the activity log and task/portfolio diffs), the chatbot grown
+      from capture-only into a capture -> CTO-assess -> delegate loop with a
+      My-reports queue, the Board and Table folded into one Jobs page, and two
+      reversible hygiene rules (auto-close of expired pre-application jobs,
+      discovery auto-prune). All derived from data the app already holds, all
+      reversible; a BOM bug that had silently hidden 2 real jobs was fixed.
+      Shipped as v0.14.0.
+    status: done
+    target: v0.14.0
+    created: '2026-07-03'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [security-privacy-guardian]
+      informed: [owner]
+
+  - id: prj-ops-management-mvp
+    name: Operational Management MVP - Intake Ledger & Per-project RACI
+    department: engineering
+    owner: software-architect
+    accountable: cto
+    goal: >-
+      Make the orchestration flow visible: an Intake ledger recording every
+      request (verbatim prompt -> CTO assessment -> the tasks/projects it spawned,
+      with live status), a PMBOK-grounded operational block per project (Sponsor /
+      Project Manager / RACI, Responsible derived from task owners not stored),
+      and a Product Hub sidebar rebuilt for a legible three-level hierarchy.
+      Grounded in a signed-off design (docs/research/2026-07-03-operational-management.md).
+      Shipped as v0.15.0.
+    status: done
+    target: v0.15.0
+    created: '2026-07-03'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: r-1783104990225
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [security-privacy-guardian]
+      informed: [owner]
+
+  - id: prj-operational-system
+    name: Operational Management System + Portfolio / Roadmap Currency
+    department: engineering
+    owner: cto
+    accountable: cto
+    goal: >-
+      Stand up the operational-management system end to end and keep the app's own
+      record honest. The intake ledger + per-project PM/RACI shipped (v0.15.0);
+      still ahead are roadmap-status-derived-from-portfolio (part 2), a full
+      stakeholder / risk register per project, prompt auto-capture into the ledger,
+      and portfolio / roadmap currency (this charting pass). Currency risk: the
+      Projects and Roadmap views drift from reality unless status is DERIVED, not
+      hand-maintained - the open milestones below close that gap.
+    status: done
+    target: v0.16.0
+    created: '2026-07-03'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: r-1783111225868
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: []
+      informed: [owner]
+    # --- stakeholder register + risk list (ADR-011): OPTIONAL + additive; added
+    # the first time a project has a genuine open risk (deferred in ADR-010). No
+    # stakeholders[] here - this is an internal OS project, so sponsor + RACI ARE
+    # the register (design section E); a stakeholder row would be ceremony. The one
+    # genuine open risk is this project's own goal: currency drift. ---
+    risks:
+      - id: risk-currency-drift
+        description: >-
+          The Projects and Roadmap views drift from reality unless status is
+          DERIVED from the underlying tasks / milestones / releases rather than
+          hand-maintained - a shipped wave or an in-progress project can sit
+          mislabeled, and the app's own record of itself stops being trustworthy.
+        likelihood: medium
+        impact: high
+        status: mitigating
+        mitigation: >-
+          Derive-not-store (roadmap status derived from linked projects /
+          milestones, the same discipline as raci.responsible derived from task
+          owners), prompt auto-capture into the intake ledger, and status
+          reconciliation at every release (governance section 3) progressively
+          close it; this v0.16.0 wave lands the derive + auto-capture pieces.
+        owner: cto
+
+  - id: prj-binary-security-doctruth
+    name: First Binary Write-path, Loopback Security and Doc-truth (v0.17.0)
+    department: engineering
+    owner: software-architect
+    accountable: cto
+    goal: >-
+      Ship the app's first binary write-path (pasted-image attachments behind eight
+      ordered guards and a guarded inline lightbox, ADR-014), bind the Express file
+      bridge loopback-only by default with LAN as an explicit opt-in (audit T1), and
+      complete the chatbot -> intake origin chain (D1 / ADR-009). Also release the
+      previously-uncut 2026-07-03-c window (completed-date / ADR-013, the advanced
+      Job Tracker filter, My-reports you/QA attribution, Fold-responsive Projects,
+      and the D4 / D6 / D11 fixes), closing a changelog + portfolio audit-trail hole.
+      Cut behind two green gates (QA GO, governance CLEAN), doc-true. Shipped as v0.17.0.
+    status: done
+    target: v0.17.0
+    created: '2026-07-04'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: r-1783144390306
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [security-privacy-guardian, governance-auditor, qa-tester]
+      informed: [owner]
+
+  - id: prj-dual-track-beta-loop
+    name: Dual-Track Beta Loop (stable channel + operating manual)
+    department: infra
+    owner: release-manager
+    accountable: cto
+    goal: >-
+      Separate the app Simon USES from the tree Simon BUILDS, so he can be a real
+      beta user of each release while development continues: the daily launcher runs
+      the last release tag from a pinned stable worktree (data stays canonical in the
+      main checkout's docs/ via the JOBHUNT_DOCS_DIR seam), a promote script makes
+      "publish" a real one-command act at release time, and a dual-track operating
+      manual codifies the two modes (user mode: never fix, only capture; build mode:
+      triage-first) plus the window loop and hotfix lane - with a maintenance rule so
+      the manual is updated in the same wave as any process change.
+    status: done
+    target: v0.19.0
+    created: '2026-07-04'
+    # --- operational-management (ADR-010): PM + RACI. responsible = DERIVED from task owners (not stored); accountable = the top-level field (not duplicated) ---
+    origin_request: r-1783197129817
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [tech-writer]
+      informed: [owner]
+
+  - id: prj-lead-theory-backbone
+    name: Theory-backbone mechanisms for the company OS
+    department: leadership
+    owner: people-enablement
+    accountable: cto
+    goal: >-
+      Adopt five org-theory sources (Simon's applied decision model, Mintzberg's
+      structuring, Beer's Viable System Model, Bryar & Carr's Working Backwards,
+      Grove's High Output Management) into the SSC company-OS kernel as ONE
+      operating mechanism each - never as reading (the books stay in the mentor
+      seminar track). Design in
+      docs/proposals/2026-07-10-theory-backbone-mechanisms-feature-design.md
+      (8 features / 3 layers); Layer 1's chartered top three are the intake
+      (F1 VSM viability check, F2 PR/FAQ gate, F3 Grove input metrics). Targets
+      the SSC/os kernel + operating routines, not app code; the Company OS v2
+      rebuild inherits it ("extend, do not reinvent"). Tasks t-1783658443597 /
+      t-1783658443675 / t-1783658443762.
+    status: in_progress
+    created: '2026-07-10'
+    origin_request: null
+    sponsor: owner
+    project_manager: cto
+    raci:
+      consulted: [governance-auditor, people-enablement, cto]
+      informed: [owner]
+
+milestones:
+  - id: prj-lead-theory-backbone-m1
+    project: prj-lead-theory-backbone
+    name: Layer 1 - the chartered top three (VSM check, PR/FAQ gate, Grove input metrics)
+    definition_of_done: >-
+      The three intake patterns land as kernel docs + routine wiring: F1 VSM
+      viability check (SSC/os/patterns/vsm-viability-check.md, piggybacked on every
+      4th weekly enablement review; must reproduce the 2026-07-09 audit findings),
+      F2 PR/FAQ gate (SSC/os/patterns/pr-faq-template.md wired into onboarding
+      step 0 + pm-conventions), and F3 Grove input metrics + the leverage question
+      added to the weekly enablement review. Docs only, no app code; npm run check
+      green.
+    status: in_progress
+    created: '2026-07-10'
+
+  - id: prj-eng-pm-layer-m1
+    project: prj-eng-pm-layer
+    name: Execution pillar readable in the app
+    definition_of_done: >-
+      GET /api/portfolio serves portfolio.yaml; tasks can carry project / milestone
+      refs (sanitized, tolerant of unresolvable refs); a Projects view renders the
+      project -> milestone -> task tree with milestone progress; npm run check green.
+    target: v0.9.0
+    status: done
+    roadmap_phase: phase-3
+    created: '2026-06-30'
+
+  - id: prj-company-os-agent-org-m1
+    project: prj-company-os-agent-org
+    name: Team page and org chart live
+    definition_of_done: >-
+      GET /api/agents serves docs/agents.yaml; the Team page (src/components/TeamView.tsx)
+      renders the org chart, agent roster, and the recursive Manager Operating System
+      (resolve / dissect / delegate / recurse / verify / integrate / optimize) from one
+      source of truth; docs/management-philosophy.md documents the cited philosophy;
+      npm run check green.
+    target: v0.9.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-06-30'
+
+  - id: prj-company-os-agent-org-m2
+    project: prj-company-os-agent-org
+    name: People & Enablement and Career Delivery agent groups onboarded
+    definition_of_done: >-
+      people-enablement agent registered in docs/agents.yaml with docs/agent-roster-audit.md
+      and docs/agent-onboarding-checklist.md delivered; three Career Delivery agents
+      (job-search-scout, application-writer, interview-offer-coach) registered with
+      agent files; weekly-enablement-review routine added; npm run check green.
+    target: v0.10.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-daily-tool-usability-a11y-m1
+    project: prj-daily-tool-usability-a11y
+    name: Interaction friction reduced
+    definition_of_done: >-
+      Status-change popup interrupts only consequential moves, backed by an Undo
+      toast for the rest; a Board archive toggle hides rejected/closed by default;
+      a needs-attention strip surfaces overdue / due-soon / stale items atop the
+      Board; Discovery's disabled Apify button is removed and the trigger renamed
+      to "Run discovery"; Table gains applied and next-action columns with sortable
+      aria-sort headers; npm run check green.
+    target: v0.9.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-06-30'
+
+  - id: prj-daily-tool-usability-a11y-m2
+    project: prj-daily-tool-usability-a11y
+    name: Accessibility hardened to WCAG AA
+    definition_of_done: >-
+      A readableOn helper picks a legible foreground for every Insights bar color
+      (WCAG AA); 44px touch targets applied across modals, panels, and hub tabs;
+      a focus trap added to the job Detail drawer; job cards and table rows are
+      keyboard-openable; the deadline off-by-one is fixed (daysUntil compares
+      calendar days at local midnight) with a boundary test; npm run check green.
+    target: v0.9.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-06-30'
+
+  - id: prj-ticket-board-activity-log-m1
+    project: prj-ticket-board-activity-log
+    name: Linear-style ticket board shipped
+    definition_of_done: >-
+      Tasks tab gains a type field (bug / feature / chore / spike), a Triage inbox
+      column, labels, estimate, assignee, and per-ticket tickable checklists, plus
+      type and status filters; the 7 optional task fields (project, milestone,
+      owner, delegated_by, acceptance, user_story, wbs) are writable via
+      POST /api/tasks and PATCH /api/tasks/:id; npm run check green.
+    target: v0.10.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-ticket-board-activity-log-m2
+    project: prj-ticket-board-activity-log
+    name: Activity / Delegation log shipped
+    definition_of_done: >-
+      GET /api/activity serves docs/activity-log.jsonl and a new Activity top-nav
+      tab renders it; tests cover the feed shape and empty-feed tolerance; npm run
+      check green. Note: the SubagentStop hook that extends capture to agent
+      delegations is a one-time user paste into settings.json (snippet documented
+      in Governance), not automatable by a release.
+    target: v0.10.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-discovery-triage-file-bridge-m1
+    project: prj-discovery-triage-file-bridge
+    name: Discovery triage and inline gaps editor shipped
+    definition_of_done: >-
+      POST /api/discovery/decide calls discovery.py decide to write Skip / Maybe /
+      Pursue back to the workbook so decided finds are not re-surfaced; the job
+      drawer's gaps markdown is editable in place via PUT /api/jobs/:id/file,
+      restricted to gaps.md and job-description.md inside the job folder;
+      write-path and path-restriction tests pass; npm run check green.
+    target: v0.10.0
+    status: done
+    roadmap_phase: phase-3
+    created: '2026-07-01'
+
+  - id: prj-discovery-triage-file-bridge-m2
+    project: prj-discovery-triage-file-bridge
+    name: File-bridge watcher hardened
+    definition_of_done: >-
+      The chokidar watcher gains an .on("error") handler and an ignore list for
+      Office temp / lock files (~$*, *.tmp, mso*) so a Windows EBUSY lock no
+      longer crashes the Express server; dev-server ownership is consolidated to
+      one main-session-owned process; npm run check green.
+    target: v0.10.0
+    status: done
+    roadmap_phase: phase-3
+    created: '2026-07-01'
+
+  - id: prj-product-hub-redesign-m1
+    project: prj-product-hub-redesign
+    name: Docs API generalized
+    definition_of_done: >-
+      GET /api/docs auto-lists and groups every markdown doc under docs/
+      (including docs/routines/ and docs/briefs/); GET /api/doc/* generalizes
+      the old 3-entry whitelist to any safe .md path; path-safety tests
+      (traversal and non-.md rejected) pass; npm run check green.
+    target: v0.10.1
+    status: done
+    created: '2026-07-01'
+
+  - id: prj-product-hub-redesign-m2
+    project: prj-product-hub-redesign
+    name: Grouped sidebar and docs browser shipped
+    definition_of_done: >-
+      ProductHub is rebuilt into a grouped collapsible sidebar plus content pane
+      plus breadcrumb, with a filter box and a data-driven Docs section covering
+      every markdown doc; the current page is highlighted; responsive at
+      360 / 840 / 1280px with a mobile drawer; ui-ux-expert review (hierarchy,
+      WCAG AA contrast, a11y) passed; npm run check green.
+    target: v0.10.1
+    status: done
+    created: '2026-07-01'
+
+  - id: prj-product-hub-redesign-m3
+    project: prj-product-hub-redesign
+    name: v0.10.1 released
+    definition_of_done: >-
+      release-manager bumps the version, adds the changelog entry, and
+      reconciles the roadmap; CTO commits, tags, and pushes; npm run check green.
+    target: v0.10.1
+    status: done
+    created: '2026-07-01'
+
+  - id: prj-connected-execution-m1
+    project: prj-connected-execution
+    name: Participant / involvement model wired both ways
+    definition_of_done: >-
+      src/lib/involvement.ts join (agentInvolvement, projectParticipants,
+      normalizeRoutine + the manager->cto alias); Projects view shows owner /
+      accountable / participant chips with milestones first-class; Team view
+      agent cards open a focus-trapped drawer of that agent's projects, tasks,
+      and activity; docs/tasks.yaml backfilled (24 tasks) with project /
+      milestone / owner / delegated_by; participant model documented in
+      pm-conventions section 9; npm run check green.
+    target: v0.11.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-connected-execution-m2
+    project: prj-connected-execution
+    name: Doc taxonomy refined and first weekly enablement review
+    definition_of_done: >-
+      The doc browser is refined from a flat catch-all into 7 coherent groups
+      (server-only); the enablement-reviews/ folder is surfaced under Reviews &
+      Logs; the first full weekly enablement review is filed
+      (docs/enablement-reviews/2026-07-01.md, roster healthy 12/0/0);
+      integrate-or-it-doesn't-count encoded into the Manager OS; v0.11.0 cut,
+      committed, tagged, CI green; npm run check green (109/109).
+    target: v0.11.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-product-hub-ia-v2-m1
+    project: prj-product-hub-ia-v2
+    name: Consolidated four-domain navigation
+    definition_of_done: >-
+      The Product hub's ~9 flat sidebar sections are consolidated into four
+      top-level domains (Delivery, Org & People, Records, Knowledge), each
+      nesting its views and doc groups with no two-item section; the current
+      page is highlighted; responsive at 360/840/1280 with the mobile drawer;
+      ui-ux-expert review (hierarchy, WCAG AA) passed; npm run check green.
+    target: v0.12.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-product-hub-ia-v2-m2
+    project: prj-product-hub-ia-v2
+    name: Structured record views (Reviews & Logs, Briefs & Debriefs, Releases)
+    definition_of_done: >-
+      GET /api/docs returns an optional meta object parsed from doc frontmatter;
+      Reviews & Logs and Briefs & Debriefs render as clickable tables over it;
+      Releases renders docs/changelog.md as a grouped, expandable
+      Keep-a-Changelog version list parsed client-side; each row opens or
+      expands in place; empty states defined; npm run check green.
+    target: v0.12.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-product-hub-ia-v2-m3
+    project: prj-product-hub-ia-v2
+    name: Addressed-via-tickets tracking
+    definition_of_done: >-
+      A ticket may carry an optional verbatim `source: "review:<doc>"` field
+      (writable on POST/PATCH, backward-compatible, not id-sanitized); the
+      Reviews & Logs table joins tickets by source to show addressed/total per
+      review (addressed == ticket done) with untriaged recs exposed when the
+      doc declares meta.recs; no parallel status store; write-path round-trip
+      test + join test green; npm run check green.
+    target: v0.12.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-product-hub-ia-v2-m4
+    project: prj-product-hub-ia-v2
+    name: Employee / onboarding page per agent
+    definition_of_done: >-
+      The Team agent drawer extends into an employee / onboarding view showing
+      onboarding status, health verdict, skills equipped, and a chronological
+      enablement-review history (from docs/enablement-reviews/*, the roster
+      audit, and the onboarding checklist) alongside the existing involvement
+      join; empty states defined; npm run check green.
+    target: v0.12.0
+    status: done
+    roadmap_phase: company-os
+    created: '2026-07-01'
+
+  - id: prj-exec-views-chatbot-m1
+    project: prj-exec-views-chatbot
+    name: Projects + Tasks execution views redesigned
+    definition_of_done: >-
+      Every task card shows its project (a ProjectChip that focuses the board);
+      Projects gains a portfolio pulse header, an active-vs-completed split, and a
+      decluttered project -> milestone -> task card; TaskBoard gains group-by-project
+      swimlanes, a project filter, and empty-lane suppression; npm run check green.
+    target: v0.13.0
+    status: done
+    roadmap_phase: phase-exec-chatbot
+    created: '2026-07-02'
+
+  - id: prj-exec-views-chatbot-m2
+    project: prj-exec-views-chatbot
+    name: Chatbot capture-and-delegate v1 shipped
+    definition_of_done: >-
+      A global, focus-trapped chat slide-over ('c'): "Queue it" files a Triage
+      ticket via the task API (no LLM); "Queue & delegate now" is confirm-gated
+      then fires the new work-ticket routine (the runner's scope check generalized
+      from job folders to tickets; a CTO agent runs against a ticket and updates
+      status via PATCH; ADR-005 sandbox unchanged); npm run check green.
+    target: v0.13.0
+    status: done
+    roadmap_phase: phase-exec-chatbot
+    created: '2026-07-02'
+
+  - id: prj-exec-views-chatbot-m3
+    project: prj-exec-views-chatbot
+    name: Per-document review progress + session-debrief routine
+    definition_of_done: >-
+      Reviews & Logs gains a per-document progress table (DocTicketsPanel): per-doc
+      recommendations -> linked tickets -> status, with a pending-decisions callout
+      for untriaged recs; a session-debrief routine (recap / verify-nothing-at-risk
+      / propagate-lessons / queue-next) is added; npm run check green.
+    target: v0.13.0
+    status: done
+    roadmap_phase: phase-exec-chatbot
+    created: '2026-07-02'
+
+  - id: prj-owner-feedback-wave-m1
+    project: prj-owner-feedback-wave
+    name: Notification feed (bell + slide-over panel)
+    definition_of_done: >-
+      GET /api/notifications + POST /api/notifications/read serve a read-mostly feed
+      DERIVED from the durable activity log (run_finished / wave_done) and
+      task/portfolio diffs against a persisted baseline (task_added / task_done /
+      project_added); the only write is one atomic notify-state.json (no push infra,
+      no event store). A NotificationBell in the TopBar opens a focus-trapped
+      role=dialog NotificationPanel with per-event-type settings, every tint from
+      lib/statusColors; npm run check green (ADR-007).
+    target: v0.14.0
+    status: done
+    roadmap_phase: phase-owner-feedback
+    created: '2026-07-03'
+
+  - id: prj-owner-feedback-wave-m2
+    project: prj-owner-feedback-wave
+    name: Chatbot capture -> assess -> delegate loop
+    definition_of_done: >-
+      Chatbot reports are tagged `chatbot` at creation and shown newest-first in a
+      My-reports queue with the latest CTO verdict inline; a clipboard button and a
+      textarea file paste/drop ingest content into a report; an assess-ticket routine
+      auto-fires a comment-only CTO assessment recorded via the append-only
+      PATCH /api/tasks/:id comment operation (history cannot be rewritten; ADR-005
+      ticket-scope addendum); npm run check green.
+    target: v0.14.0
+    status: done
+    roadmap_phase: phase-owner-feedback
+    created: '2026-07-03'
+
+  - id: prj-owner-feedback-wave-m3
+    project: prj-owner-feedback-wave
+    name: Jobs IA merge, reversible hygiene rules, BOM fix
+    definition_of_done: >-
+      The Board and Table fold into one Jobs page with a segmented view switcher
+      (the jobs table groups by status and sinks submitted/closed to the bottom);
+      rule-based auto-close moves expired lead/queued/drafted jobs (a real
+      YYYY-MM-DD deadline before today) to closed via the surgical frontmatter path
+      (no agent, reversible); discovery.py prune MOVES dead rows to an Archive sheet
+      before every discover-jobs run (never deletes; ADR-008); the frontmatter reader
+      tolerates a leading BOM (2 real jobs were invisible); npm run check green.
+    target: v0.14.0
+    status: done
+    roadmap_phase: phase-owner-feedback
+    created: '2026-07-03'
+
+  - id: prj-ops-management-mvp-m1
+    project: prj-ops-management-mvp
+    name: Intake ledger shipped
+    definition_of_done: >-
+      docs/requests.yaml + GET/POST/PATCH /api/requests record each request's
+      verbatim prompt (never trimmed), source (session|chatbot), timestamp, CTO
+      assessment, and spawned tasks/projects; an Intake view renders requests
+      newest-first, expanding to the full prompt + assessment + every spawned
+      task/project with its LIVE board status (never copied); 5 requests backfilled
+      deterministically; npm run check green (ADR-009).
+    target: v0.15.0
+    status: done
+    roadmap_phase: phase-ops-management
+    created: '2026-07-03'
+
+  - id: prj-ops-management-mvp-m2
+    project: prj-ops-management-mvp
+    name: Per-project operational block (Sponsor / PM / RACI)
+    definition_of_done: >-
+      portfolio.yaml projects gain optional origin_request / sponsor /
+      project_manager / raci{consulted,informed}; the Projects view renders an
+      Operational Management block where the single Accountable IS the top-level
+      accountable field and Responsible is DERIVED from the distinct task owners
+      (the participant join), never a parallel store; backfilled truthfully across
+      all 8 existing projects; npm run check green (ADR-010).
+    target: v0.15.0
+    status: done
+    roadmap_phase: phase-ops-management
+    created: '2026-07-03'
+
+  - id: prj-ops-management-mvp-m3
+    project: prj-ops-management-mvp
+    name: Product Hub sidebar rebuilt for hierarchy
+    definition_of_done: >-
+      The Product Hub sidebar renders a legible three-level hierarchy: domain
+      dividers + trailing caret (L1), primary items (L2), collapsible group chevrons
+      that rotate on expand (L3), and lighter guided nested docs (L4); the
+      indentation-inversion bug and the near-invisible collapse triangles are fixed;
+      uniform row rhythm + 44px mobile tap targets; the mobile drawer + focus-trap
+      are preserved; npm run check green.
+    target: v0.15.0
+    status: done
+    roadmap_phase: phase-ops-management
+    created: '2026-07-03'
+
+  - id: prj-operational-system-m1
+    project: prj-operational-system
+    name: Operational-management MVP (intake ledger + per-project RACI)
+    definition_of_done: >-
+      The intake ledger (docs/requests.yaml + API + Intake view) and the per-project
+      operational block (Sponsor / Project Manager / RACI, Responsible derived from
+      task owners) shipped in v0.15.0 and are live on origin; ADR-009 and ADR-010
+      recorded.
+    target: v0.15.0
+    status: done
+    roadmap_phase: phase-ops-management
+    created: '2026-07-03'
+
+  - id: prj-operational-system-m2
+    project: prj-operational-system
+    name: Roadmap-status derived + stakeholder / risk register
+    definition_of_done: >-
+      The Roadmap view DERIVES each item/phase status from its linked
+      projects / milestones / releases (single source of truth, the same discipline
+      as raci.responsible derived from task owners) so it cannot drift (part 2,
+      tracked in t-1783099524352); each project can carry a full stakeholder register
+      + risk list, built when a project has a real external stakeholder or open risk;
+      npm run check green.
+    target: v0.16.0
+    status: done
+    roadmap_phase: phase-ops-management-2
+    created: '2026-07-03'
+
+  - id: prj-operational-system-m3
+    project: prj-operational-system
+    name: Prompt auto-capture + portfolio / roadmap currency
+    definition_of_done: >-
+      Every ask is auto-captured into the intake ledger (intake-first discipline)
+      rather than backfilled by hand; the portfolio (Projects view) and roadmap
+      reflect reality with no false-by-omission gaps - the shipped waves and the
+      current in-progress work are charted, and status is reconciled at every
+      release; npm run check green.
+    target: v0.16.0
+    status: done
+    roadmap_phase: phase-ops-management-2
+    created: '2026-07-03'
+
+  - id: prj-binary-security-doctruth-m1
+    project: prj-binary-security-doctruth
+    name: Previously-uncut 2026-07-03-c window released
+    definition_of_done: >-
+      The work between the v0.16.0 tag and this cut, which had shipped to no
+      changelog, is documented and released: completed-date across the 3 most-recent
+      surfaces (ADR-013), the advanced multi-condition Job Tracker filter (JobFilterBar
+      + pure jobFilter.ts), the My-reports you/QA attribution + QA function stand-up,
+      the Fold-responsive Projects split, and the D4 / D6 / D11 fixes; npm run check green.
+    target: v0.17.0
+    status: done
+    roadmap_phase: phase-binary-security-doctruth
+    created: '2026-07-04'
+
+  - id: prj-binary-security-doctruth-m2
+    project: prj-binary-security-doctruth
+    name: Loopback-by-default security (T1), chatbot -> intake chain (D1), dev-infra honesty
+    definition_of_done: >-
+      app.listen binds config.serverHost || 127.0.0.1 (loopback-only default, LAN
+      opt-in; audit T1) with the bind posture disclosed in DATA_CONTRACT.md (O-2);
+      ChatCapture also writes a linked intake record best-effort/fail-soft (D1 /
+      ADR-009); activity-log honesty (dangling run closed, lint category fix,
+      lint:activity-log wired into the gate) + the vitest 4 / vite 6 audit-clean
+      upgrade; npm run check green.
+    target: v0.17.0
+    status: done
+    roadmap_phase: phase-binary-security-doctruth
+    created: '2026-07-04'
+
+  - id: prj-binary-security-doctruth-m3
+    project: prj-binary-security-doctruth
+    name: Image attach + preview + lightbox - the app's first binary write-path (ADR-014)
+    definition_of_done: >-
+      POST /api/tasks/:id/attachments accepts raw image bytes behind 8 ordered guards
+      (MIME allowlist + independent magic-byte sniff, 5 MB + 6/ticket caps,
+      content-addressed docs/attachments/<taskId>/<sha256>.<ext>, path containment,
+      atomic write, unforgeable server-managed metadata) read back through a guarded
+      inline reader (nosniff + CSP + no-store, never a static server); ChatCapture
+      pastes/drops to a pending thumbnail -> fail-soft upload after the task POST ->
+      a focus-trapped lightbox viewer; DATA_CONTRACT amendment + ADR-014; runtime
+      write-path confirmed by the CTO; npm run check green.
+    target: v0.17.0
+    status: done
+    roadmap_phase: phase-binary-security-doctruth
+    created: '2026-07-04'
+
+  - id: prj-binary-security-doctruth-m4
+    project: prj-binary-security-doctruth
+    name: v0.17.0 cut behind two green gates + doc-truth reconcile
+    definition_of_done: >-
+      A QA release-regression sweep across all 9 journeys returned GO (no open
+      Critical/High; the image binary write-path runtime-confirmed) and the governance
+      audit returned CLEAN; the changelog documents the whole v0.16.0..HEAD window,
+      package.json bumped to 0.17.0, three doc-truth reconciles folded in (O-2 bind
+      posture, D4 -> resolved, AC-J6 breakpoint), npm run check green (451 tests);
+      committed + tagged v0.17.0 (not pushed).
+    target: v0.17.0
+    status: done
+    roadmap_phase: phase-binary-security-doctruth
+    created: '2026-07-04'
+
+  - id: prj-dual-track-beta-loop-m1
+    project: prj-dual-track-beta-loop
+    name: Stable channel live + dual-track manual published
+    definition_of_done: >-
+      ops/scripts/start-app.cmd launches the app from the stable worktree
+      (C:/Users/you/ssc-brain/mabrain-jobhunt-stable, pinned to the latest release tag) with
+      JOBHUNT_DOCS_DIR pointed at the main checkout's docs/ so all app-managed data
+      stays canonical, falling back to the main checkout when the worktree is absent;
+      ops/scripts/promote-stable.cmd idempotently creates/updates the worktree to a
+      tag (default newest v*), installs deps, restarts the app per the documented
+      kill-both-ports procedure and verifies the API answers; the live app verifiably
+      serves release-tag code with live docs data. docs/dual-track-sop.md exists
+      covering channels, the two modes, the window loop, the hotfix lane, and the
+      promote procedure, carries its own same-wave maintenance rule, and is
+      cross-linked from governance.md (release checklist gains the promote step and
+      the process-changed-then-SOP-updated check) and task-lifecycle-sop.md.
+    target: v0.19.0
+    status: done
+    created: '2026-07-04'

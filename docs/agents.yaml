@@ -1,0 +1,426 @@
+# =============================================================================
+# SUPERSEDED for roster CHANGES - the canonical roster is
+# company-os/os/agents.yaml (adopted S14, 2026-07-10). Change the roster THERE.
+# This copy is RUNTIME-PINNED, not deletable (audit F8 exception, recorded in
+# company-os/decisions/2026-07-13-kernel-archive-policy.md): server/index.js
+# reads it live for the roster API (/Team tab, routine->agent binding). Keep it
+# in sync with canonical until a code seam re-homes the read. Correction
+# (2026-07-13): the 3 app-operators stay USER-GLOBAL in ~/.claude/agents/ - the
+# 2026-07-06 repo-local move was reverted (bound-agent resolver, ADR-001).
+# =============================================================================
+# AI product-development org (app-managed). Rendered in the app: Product hub -> Team.
+# Each role below is a reusable Claude Code agent in ~/.claude/agents/<id>.md, except
+# the stakeholder (the human owner) and the CTO (the main Claude Code session).
+# This file is the single source of truth for the org chart; agent_file links the role
+# to its actual agent definition. reports_to draws the tree; collaborates_with draws
+# the lateral edges; group clusters by function.
+
+version: 1
+updated: '2026-07-03'
+
+# The recursive Manager Operating System (MOS): the reusable company template every
+# manager runs over their team, at any level. Full cited philosophy:
+# docs/management-philosophy.md. Reusable manager agent template: ~/.claude/agents/manager.md.
+management:
+  template: ~/.claude/agents/manager.md
+  philosophy_doc: management-philosophy.md
+  recursive: true    # manager delegates DOWN; a report that is itself a manager recurses; leaves execute; results integrate UP
+  shadow_mode: true  # the top manager (CTO) surfaces its plan for the owner to review until trust is earned, then runs more autonomously
+  loop:
+    - id: resolve
+      label: Resolve
+      detail: Restate the goal, success criteria, and constraints. No action on a vague task.
+    - id: dissect
+      label: Dissect
+      detail: Decompose into the smallest subtasks; mark independent (parallel) vs sequential.
+    - id: delegate
+      label: Delegate
+      detail: Route each subtask to the best-fit report with a crisp brief (objective, output, tools, boundaries); scale effort to complexity.
+    - id: recurse
+      label: Recurse
+      detail: A report that is itself a manager runs the same loop; individual contributors execute. Cap depth and iterations.
+    - id: verify
+      label: Verify
+      detail: Adversarially check each result against its acceptance criteria; prefer structured, inspectable outputs.
+    - id: integrate
+      label: Integrate
+      detail: Merge verified pieces into a coherent whole, resolve conflicts, then report up.
+    - id: optimize
+      label: Optimize
+      detail: Top-down and continuous - tighten each report's scope, brief, or tools where it underperformed.
+  principles:
+    - text: Teach the orchestrator to delegate; scale effort to complexity; think like your agents.
+      source: Anthropic - multi-agent research system
+    - text: Decompose complex work into role-specialized subtasks (Reflection, Tool use, Planning, Multi-agent).
+      source: Andrew Ng - agentic design patterns
+    - text: Encode SOPs and specialized roles; communicate via structured outputs; verify intermediate results.
+      source: MetaGPT (Hong et al., ICLR 2024) and ChatDev
+    - text: A supervisor of supervisors forms the recursive tree; cap iterations and treat the cap as an alarm.
+      source: LangGraph hierarchical supervisor
+    - text: Only split genuinely independent work; fragmented context is the main failure mode.
+      source: Cognition AI - context engineering
+
+groups:
+  - id: stakeholder
+    label: Owner / Stakeholder
+  - id: leadership
+    label: Leadership
+  - id: product
+    label: Product
+  - id: engineering
+    label: Engineering
+  - id: design
+    label: Design
+  - id: quality
+    label: Quality & Safety
+  - id: infra
+    label: Release & Infra
+  - id: docs
+    label: Documentation
+  - id: people
+    label: People & Enablement
+  - id: career-delivery
+    label: Career Delivery
+  - id: governance
+    label: Governance & Audit
+
+roles:
+  - id: owner
+    title: Simon (Founder, Product Owner, End user)
+    kind: human
+    group: stakeholder
+    reports_to: null
+    status: active
+    agent_file: null
+    one_liner: >-
+      Sets the vision and priorities, curates what matters, approves releases,
+      and is the actual user of the product.
+    owns:
+      - Vision and direction
+      - Final say on scope and releases
+      - Real-world job-hunt workflow the product serves
+
+  - id: cto
+    title: CTO / Orchestrator
+    kind: orchestrator
+    group: leadership
+    reports_to: owner
+    status: active
+    agent_file: null                      # the main Claude Code session
+    playbook: ~/.claude/agents/manager.md # runs the reusable Manager Operating System
+    mode: shadow                          # surfaces its delegation plan for the owner until trust is earned
+    one_liner: >-
+      The top manager. Runs the recursive Manager Operating System over the whole team:
+      resolves the owner's goal, dissects it, delegates to the best-fit report (recursing
+      through sub-managers), verifies, integrates, and reports back. In shadow mode for now.
+    owns:
+      - Resolving + dissecting the owner's goals into delegable work
+      - Routing each piece to the best-fit report and integrating the result
+      - Release go/no-go
+      - The org and the continuous optimization of every agent definition
+    skills:
+      - Goal decomposition
+      - Best-fit delegation
+      - Model + effort routing
+      - Adversarial verification
+      - Result integration
+      - Release go/no-go
+
+  - id: product-manager
+    title: Product Manager
+    kind: agent
+    group: product
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/product-manager.md
+    one_liner: Defines what to build and why - requirements, slicing, acceptance criteria, backlog.
+    owns:
+      - Roadmap (docs/roadmap.yaml) and backlog (docs/tasks.yaml)
+      - Acceptance criteria
+      - Prioritization and saying no
+    skills:
+      - Problem framing
+      - Scope slicing
+      - Acceptance criteria
+      - Backlog grooming
+      - Roadmap sequencing
+      - Deep-research evidence
+    collaborates_with: [software-architect, ui-ux-expert]
+
+  - id: software-architect
+    title: Software Architect
+    kind: agent
+    group: engineering
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/software-architect.md
+    one_liner: Backend/system design, API + data model, vault write-path safety, ADRs.
+    owns:
+      - Server / API design (server/index.js, server/lib.js)
+      - Data model and the write-path contract
+      - Architecture decision records
+    skills:
+      - API design
+      - Data modeling
+      - Write-path safety
+      - ADR authoring
+      - Dependency trade-offs
+      - Test-seam contracts
+    collaborates_with: [frontend-engineer, test-engineer, security-privacy-guardian]
+
+  - id: frontend-engineer
+    title: Frontend Engineer
+    kind: agent
+    group: engineering
+    reports_to: software-architect
+    status: active
+    agent_file: ~/.claude/agents/frontend-engineer.md
+    one_liner: Builds React + TypeScript + Vite features and wires them to the API.
+    owns:
+      - src/ views, components, hooks
+      - API wiring (src/api.ts)
+    skills:
+      - React + TypeScript
+      - Component implementation
+      - State + hooks
+      - API wiring
+      - Accessible markup
+      - Browser verification
+    collaborates_with: [ui-ux-expert, test-engineer]
+
+  - id: ui-ux-expert
+    title: UI/UX Designer
+    kind: agent
+    group: design
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/ui-ux-expert.md
+    one_liner: Design review, accessibility (WCAG AA), responsive polish across desktop + Galaxy Fold 6.
+    owns:
+      - Visual + interaction quality
+      - Accessibility and responsiveness
+      - Design tokens / shared component look
+    skills:
+      - Heuristic design review
+      - WCAG AA audits
+      - Responsive checks
+      - Live browser probes
+      - Design-token fixes
+      - Static audit fallback
+    collaborates_with: [frontend-engineer]
+
+  - id: test-engineer
+    title: Test Engineer (QA)
+    kind: agent
+    group: quality
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/test-engineer.md
+    one_liner: Writes and reviews unit + integration tests (Vitest); guards the write-path; owns the quality bar.
+    owns:
+      - tests/ suite and the npm run check gate
+      - The updateFrontmatter write-path guard tests
+      - Quality constitution enforcement
+    skills:
+      - Vitest + supertest
+      - Write-path hardening
+      - Coverage design
+      - Boundary-case testing
+      - Flake diagnosis
+      - Red-test evidence
+    collaborates_with: [software-architect, frontend-engineer]
+
+  - id: qa-tester
+    title: QA Tester (Black-box / E2E)
+    kind: agent
+    group: quality
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/qa-tester.md
+    one_liner: >-
+      Black-box QA - walks the real user journeys in the running app, files bugs
+      by severity (qa-report label -> "My Reports" + triage), gates the release sign-off.
+    owns:
+      - Black-box exploratory + end-to-end user-journey testing
+      - Bug filing by severity (labels qa-report,bug -> triage) and re-test on fix
+      - Per-release regression sweep + quality-gate sign-off
+    skills:
+      - Exploratory / session-based testing
+      - User-journey E2E walks
+      - Live browser probing
+      - Bug-report authoring
+      - Severity + priority triage
+      - Regression + release sign-off
+    collaborates_with: [test-engineer, frontend-engineer, product-manager]
+
+  - id: security-privacy-guardian
+    title: Security & Privacy Guardian
+    kind: agent
+    group: quality
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/security-privacy-guardian.md
+    one_liner: Guards data sovereignty, secrets, least-privilege agent permissions, and supply-chain risk.
+    owns:
+      - The data contract (DATA_CONTRACT.md)
+      - Secret handling and the scoped-runner permission model
+      - Dependency / integration risk review
+    skills:
+      - Data-contract enforcement
+      - Secret handling
+      - Least-privilege review
+      - Path-traversal safety
+      - Supply-chain vetting
+      - Security-review passes
+    collaborates_with: [software-architect, release-manager]
+
+  - id: release-manager
+    title: Release Manager (DevOps)
+    kind: agent
+    group: infra
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/release-manager.md
+    one_liner: Owns releases - the check gate, version bumps, changelog, git tags, run pipeline, LAN/deploy.
+    owns:
+      - Versioning + changelog (docs/changelog.md)
+      - The npm run check release gate
+      - Run pipeline + deploy surface (SETUP.md)
+    skills:
+      - Check-gate enforcement
+      - Version bumps
+      - Changelog curation
+      - Git tagging
+      - CI workflow upkeep
+      - Run-pipeline ops
+    collaborates_with: [test-engineer, security-privacy-guardian]
+
+  - id: tech-writer
+    title: Technical Writer
+    kind: agent
+    group: docs
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/tech-writer.md
+    one_liner: Keeps the docs true to the code - blueprint, governance, changelog prose, setup, readme.
+    owns:
+      - docs/ and root docs (README, SETUP, CONTRIBUTING)
+      - In-app help copy
+      - The documentation map (one home per thing)
+    skills:
+      - Changelog prose
+      - Doc-code reconciliation
+      - Task-first writing
+      - GFM Markdown
+      - Documentation mapping
+      - In-app help copy
+    collaborates_with: [product-manager, release-manager]
+
+  - id: people-enablement
+    title: People & Enablement (HR / L&D)
+    kind: agent
+    group: people
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/people-enablement.md
+    one_liner: Keeps the agent workforce healthy and current - roster drift audits, onboarding, skills adoption, standards currency.
+    owns:
+      - Agent-roster health and drift audits
+      - Onboarding new agents + the onboarding checklist
+      - Skills / capability tracking and adoption
+      - Standards currency across the roster
+    skills:
+      - Roster drift audits
+      - Agent onboarding
+      - Skill sourcing
+      - Standards propagation
+      - Quality-bar enforcement
+      - Enablement reviews
+    collaborates_with: [tech-writer, security-privacy-guardian]
+
+  - id: job-search-scout
+    title: Job Search Scout (Discovery)
+    kind: agent
+    group: career-delivery
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/job-search-scout.md
+    one_liner: Sources and triages postings, maps each to one of the seven tracks plus a sector, files the job folder.
+    owns:
+      - Discovery + posting triage
+      - Track + sector mapping and tailoring effort
+      - Filing Jobs/<Role> - <Employer>/ folders
+    skills:
+      - Job sourcing
+      - Posting triage
+      - Track + sector mapping
+      - Fit scoring
+      - Job-folder filing
+      - Company diligence
+    collaborates_with: [application-writer]
+
+  - id: application-writer
+    title: Application Writer (CV + Cover Letter)
+    kind: agent
+    group: career-delivery
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/application-writer.md
+    one_liner: Generates and tailors the CV and cover letter from the facts source of truth, ATS-optimizes, renders via the pipeline.
+    owns:
+      - CV + cover letter generation from ops/facts/*.yaml
+      - ATS optimization + render (first-draft-job / finalize-job)
+      - Facts stewardship (profile-refresh, Master CV)
+    skills:
+      - CV tailoring
+      - Cover-letter generation
+      - ATS optimization
+      - Render pipeline
+      - Facts stewardship
+      - Master CV upkeep
+    collaborates_with: [job-search-scout, interview-offer-coach]
+
+  - id: interview-offer-coach
+    title: Interview & Offer Coach
+    kind: agent
+    group: career-delivery
+    reports_to: cto
+    status: active
+    agent_file: ~/.claude/agents/interview-offer-coach.md
+    one_liner: STAR prep, mock questions, references, salary negotiation, and offer comparison for late-stage jobs.
+    owns:
+      - Interview prep (STAR, questions, talking points)
+      - References + salary negotiation
+      - Offer comparison
+    skills:
+      - STAR story prep
+      - Mock interview questions
+      - Reference prep
+      - Market-rate research
+      - Salary negotiation
+      - Offer comparison
+    collaborates_with: [application-writer]
+
+  - id: governance-auditor
+    title: Governance & Audit (independent)
+    kind: agent
+    group: governance
+    reports_to: owner
+    status: active
+    agent_file: ~/.claude/agents/governance-auditor.md
+    one_liner: >-
+      Independent, read-only audit of whether the org's load-bearing claims
+      (docs, code, roster, activity log) match reality. Reports to the owner,
+      not the CTO, for separation of duties.
+    owns:
+      - Doc-vs-code claim verification
+      - Activity-log integrity and roster/org honesty checks
+      - Ticket/traceability and status-reconciliation audits (per release + org-structure change)
+    skills:
+      - Doc-vs-code audits
+      - Activity-log integrity
+      - Roster honesty checks
+      - Traceability audits
+      - Status reconciliation
+      - Severity calibration
+    collaborates_with: [people-enablement, release-manager, tech-writer]

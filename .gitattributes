@@ -1,0 +1,5 @@
+# Line-ending normalization. Without this, git autocrlf=true checks .mjs files
+# out as CRLF in fresh worktrees, and vitest's transform chokes on a CRLF-
+# terminated `#!` shebang ("Invalid or unexpected token"), breaking the gate.
+# The committed blobs are already LF; this keeps working copies LF too.
+*.mjs text eol=lf

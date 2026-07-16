@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Reading the gaps note and the current draft for this fictional demo job."},{"type":"tool_use","name":"Read","input":{"file_path":"Jobs/Demo/gaps.md"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Re-tailoring the application content with the answered gaps."},{"type":"tool_use","name":"Write","input":{"file_path":"Jobs/Demo/application-content.json"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Rendering the final documents and PDFs."},{"type":"tool_use","name":"Bash","input":{"command":"python demo/render_application.py --job Jobs/Demo --final"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Updating the job file to ready."},{"type":"tool_use","name":"Write","input":{"file_path":"Jobs/Demo/Operations Analyst.md"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Finalize complete. The application is ready for the owner to submit. Demo content only."}]}}
+{"type":"result","subtype":"success","duration_ms":78000,"num_turns":6,"total_cost_usd":0,"result":"Finalize complete (demo replay)."}

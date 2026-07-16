@@ -1,0 +1,8 @@
+{"ts":"2026-07-05T09:00:00.000Z","kind":"delegation","routine":"test-engineer","label":"fixture: terminal-only delegation","status":"done"}
+{"ts":"2026-07-05T09:01:00.000Z","kind":"note","routine":"manager","label":"fixture: manager aliases to cto","status":"done"}
+{"ts":"2026-07-05T09:02:00.000Z","kind":"run","runId":"fx-a","routine":"discover-jobs-source","label":"fixture: paired run","jobId":"src-1","batchId":"fx-b1","status":"running"}
+{"ts":"2026-07-05T09:02:30.000Z","kind":"run","runId":"fx-b","routine":"first-draft-job","label":"fixture: concurrent interleaved run","jobId":"job-1","batchId":null,"status":"running"}
+{"ts":"2026-07-05T09:04:00.000Z","kind":"run","runId":"fx-a","status":"done","exitCode":0,"batchId":"fx-b1"}
+{"ts":"2026-07-05T09:05:00.000Z","kind":"run","runId":"fx-b","status":"stopped","exitCode":null,"batchId":null}
+{"ts":"2026-07-05T09:06:00.000Z","kind":"run","runId":"fx-c","routine":"work-ticket","label":"fixture: failed run is still terminal","jobId":"t-1","batchId":null,"status":"running"}
+{"ts":"2026-07-05T09:07:00.000Z","kind":"run","runId":"fx-c","status":"failed","exitCode":1,"batchId":null}

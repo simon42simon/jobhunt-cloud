@@ -1,0 +1,60 @@
+name: deploy
+
+# RC-3 / SIM-87 I8 - build the container image on a version tag and (STAGED) deploy
+# it to Railway. This wiring is PREPARED, not yet live: the job is gated on the
+# `DEPLOY_ENABLED` repo variable, so it is a no-op until the owner flips it on at
+# actual deploy time (RC-2/RC-4). The Railway step is additionally gated on the
+# RAILWAY_TOKEN secret, so it never fails a run where the secret is unset.
+#
+# NOTE (build context): ssc-ui is vendored into ./ssc-ui in this repo (a prebuilt
+# dist + a minimal package.json), so `file:./ssc-ui` resolves with no extra checkout
+# and `docker build` needs only this repo as its context.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build-and-deploy:
+    # STAGED: skipped until the owner sets the DEPLOY_ENABLED repo variable to 'true'.
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Checkout app
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.ref_name }}
+            ${{ env.IMAGE }}:latest
+
+      # ---- STAGED Railway deploy (runs only when RAILWAY_TOKEN is configured) ----
+      - name: Deploy to Railway
+        if: ${{ secrets.RAILWAY_TOKEN != '' }}
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          echo "Deploying ${{ env.IMAGE }}:${{ github.ref_name }} to Railway"
+          npm i -g @railway/cli
+          # The service is configured to deploy the pushed image tag; `railway up`
+          # / `railway redeploy` is wired here at actual deploy time (RC-2/RC-4).
+          railway redeploy --yes || echo "railway redeploy not yet configured (staged)"

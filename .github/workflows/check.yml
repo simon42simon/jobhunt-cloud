@@ -1,0 +1,37 @@
+name: check
+
+# CI signal (honor system): runs the same release gate as local (typecheck +
+# tests) plus a production-dependency audit, on every push and pull request.
+# This is a solo repo with no branch protection, so a red run does NOT block
+# merging - it is a visible signal to fix before shipping.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - run: npm ci
+      # Secret-scan gate dependency: npm run check invokes gitleaks (lint:secrets),
+      # which is not preinstalled on GitHub runners. Pinned to the version the
+      # local gate was proven against.
+      - name: Install gitleaks
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar -xz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      # Dependency gate: fail if a new high/critical vuln lands in a production
+      # (shipped) dependency. Scoped to --omit=dev on purpose: the only known
+      # residual is dev-only (vitest 2.x pulling vite 5 / esbuild 0.21) and is
+      # fixable only via a breaking major bump, so it is deferred and documented
+      # rather than forced. Gating all deps at high would keep CI permanently red.
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run check

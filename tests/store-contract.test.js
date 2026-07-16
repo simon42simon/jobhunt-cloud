@@ -1,0 +1,442 @@
+// Parameterized STORE CONTRACT suite (RC-3 / SIM-87 I2, ADR-025).
+//
+// One spec run against ANY Store implementation, encoding the interface contract
+// the storage seam promises: CRUD round-trips, tolerant absent->empty reads,
+// append-only semantics, byte-identical blob round-trips, unforgeable/never-SoT
+// write guards, and error paths. FileStore passes it here; PgStore (I4) plugs in
+// by adding ONE entry to the `backends` array below - ZERO changes to the spec
+// bodies, because every test seeds + asserts THROUGH the store interface, never
+// through a backend-specific fixture.
+//
+// Two scoping notes, faithful to the binding design:
+//  - EVENT EMISSION is deliberately NOT a per-store contract here. Design 2.4:
+//    "the store does not own the SSE channel; the route does." FileStore's
+//    jobs-changed signal is the external chokidar watcher; every other mutation is
+//    broadcast by the route. Route-level SSE emission is guarded by
+//    tests/sse-broadcast.test.js, not by a store method.
+//  - The FRONTMATTER BYTE-CONTRACT (EOL/BOM/body preserved, only WRITABLE_FIELDS
+//    touched) is a FileStore realization of the cross-store "updateJobFields
+//    changes only the named fields" contract - PgStore has no markdown bytes to
+//    preserve (it keeps typed columns + raw_frontmatter). So the DOMAIN round-trip
+//    is parameterized (all stores), and the byte-level assertions live in a
+//    FileStore-specific block at the end.
+//
+// The suite constructs FileStore DIRECTLY via resolveStore against a temp dir - no
+// Express app, no supertest, no server boot - which is exactly the importable/
+// testable-in-isolation property the seam was designed for. It imports the three
+// exported domain helpers (dropInvalidJobEnums / normalizeSource / serializeSource)
+// that FileStore takes by injection; index.js is imported only for those pure
+// functions (JOBHUNT_TEST=1 + a throwaway vault dir keep that import hermetic).
+
+import { describe, it, expect, beforeEach, afterEach, afterAll } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { provisionPgBackend } from "./helpers/embedded-pg.mjs";
+
+process.env.JOBHUNT_TEST = "1";
+// Keep the index.js import (for the exported domain helpers only) hermetic: point
+// its vault/docs seams at a throwaway dir so importing it never touches the real
+// vault and never binds a port / starts the watcher (JOBHUNT_TEST gate).
+const bootDir = fs.mkdtempSync(path.join(os.tmpdir(), "store-contract-boot-"));
+process.env.JOBHUNT_JOBS_DIR = process.env.JOBHUNT_JOBS_DIR || bootDir;
+process.env.JOBHUNT_DOCS_DIR = process.env.JOBHUNT_DOCS_DIR || bootDir;
+
+const { dropInvalidJobEnums, normalizeSource, serializeSource } = await import("../server/index.js");
+const { resolveStore, FileStore } = await import("../server/store.js");
+
+// The status vocabulary the store's job-record derivation checks against. Kept
+// local to the contract (the contract does not depend on the product's exact
+// track/status list - only that what createJob writes, getJobSummary reads back).
+const STATUSES = ["lead", "queued", "drafted", "ready", "submitted", "interview", "offer", "rejected", "closed"];
+const DEPS = { TRACKS: {}, STATUSES, dropInvalidJobEnums, normalizeSource, serializeSource };
+
+// ---- backend registry: add PgStore here at I4, nothing else changes ----------
+const backends = [
+  {
+    name: "FileStore",
+    make() {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "store-contract-"));
+      const jobsDir = path.join(root, "Jobs");
+      const docsDir = path.join(root, "docs");
+      const dataDir = path.join(root, "data");
+      for (const d of [jobsDir, docsDir, dataDir]) fs.mkdirSync(d, { recursive: true });
+      const store = resolveStore({}, { jobsDir, docsDir, dataDir, deps: DEPS });
+      store.init();
+      return {
+        store,
+        cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
+        // FileStore-only escape hatch for the byte-contract block (not used by the
+        // parameterized specs). Lets that block plant a raw CRLF+BOM job file.
+        _fileRoot: { jobsDir, docsDir, dataDir },
+      };
+    },
+  },
+];
+
+// ---- PgStore backend (I4): the ONE sanctioned change to this file per the design
+// ("describe.each gains the PgStore row"). Every test BODY is untouched - PgStore
+// passes the identical specs. The backend self-provisions a real ephemeral Postgres
+// (embedded-postgres); if it cannot start (offline binary download, or a Windows
+// ADMIN-token refusal on an elevated shell - run de-elevated to exercise it) the
+// row is omitted with a clear console note and the FileStore row still runs, so the
+// gate stays green everywhere. See tests/helpers/embedded-pg.mjs.
+const pgBackend = await provisionPgBackend(DEPS);
+if (pgBackend.available) {
+  backends.push(pgBackend.backend);
+} else {
+  // eslint-disable-next-line no-console
+  console.warn(`[store-contract] PgStore backend SKIPPED: ${pgBackend.reason}`);
+}
+afterAll(async () => {
+  if (pgBackend.available) await pgBackend.stopAll();
+});
+
+describe.each(backends)("Store contract [$name]", ({ make }) => {
+  let ctx;
+  let store;
+  beforeEach(() => {
+    ctx = make();
+    store = ctx.store;
+  });
+  afterEach(() => ctx.cleanup());
+
+  // ---- tasks -------------------------------------------------------------
+  describe("tasks", () => {
+    it("round-trips a saved board and normalizes comments to [] on read", () => {
+      store.saveTasks({
+        columns: ["backlog", "todo", "done"],
+        tasks: [
+          { id: "t-1", title: "One", status: "todo" }, // no comments key
+          { id: "t-2", title: "Two", status: "done", comments: [{ author: "cto", body: "hi" }] },
+        ],
+      });
+      const { columns, tasks } = store.loadTasks();
+      expect(columns).toEqual(["backlog", "todo", "done"]);
+      const t1 = tasks.find((t) => t.id === "t-1");
+      const t2 = tasks.find((t) => t.id === "t-2");
+      expect(t1.comments).toEqual([]); // read-side normalization
+      expect(t2.comments).toEqual([{ author: "cto", body: "hi" }]);
+      expect(t1.title).toBe("One");
+    });
+
+    it("preserves server-managed fields verbatim across a round-trip", () => {
+      store.saveTasks({
+        columns: ["backlog"],
+        tasks: [{ id: "t-9", title: "T", status: "done", completed: "2026-07-16", created: "2026-07-01" }],
+      });
+      const t = store.loadTasks().tasks[0];
+      expect(t.completed).toBe("2026-07-16");
+      expect(t.created).toBe("2026-07-01");
+    });
+  });
+
+  // ---- requests (tolerant absent + verbatim + spawned coercion) ----------
+  describe("requests", () => {
+    it("yields { requests: [] } when nothing has been written (absent -> empty)", () => {
+      expect(store.loadRequests()).toEqual({ requests: [] });
+    });
+
+    it("stores request text VERBATIM (colons, hashes, quotes, newlines survive)", () => {
+      const text = 'ship it: fast # now "quoted"\nsecond line';
+      store.saveRequests({
+        requests: [{ id: "r-1", text, source: "session", created: "2026-07-16", ts: "2026-07-16T00:00:00.000Z", spawned: { tasks: [], projects: [] } }],
+      });
+      expect(store.loadRequests().requests[0].text).toBe(text);
+    });
+
+    it("coerces spawned refs (sanitize + dedupe) on read", () => {
+      store.saveRequests({
+        requests: [{ id: "r-2", text: "x", source: "chatbot", created: "2026-07-16", ts: "2026-07-16T00:00:00.000Z", spawned: { tasks: ["T-1 ", "t-1", "b@d!"], projects: [] } }],
+      });
+      const r = store.loadRequests().requests[0];
+      expect(r.source).toBe("chatbot");
+      expect(r.spawned.tasks).toEqual(["t-1", "bd"]); // "T-1 "->"t-1" dedupes; "b@d!"->"bd"
+      expect(r.spawned.projects).toEqual([]);
+    });
+  });
+
+  // ---- notify state (tolerant absent + round-trip) -----------------------
+  describe("notify state", () => {
+    it("returns the uninitialized shape when absent", () => {
+      expect(store.loadNotifyState()).toEqual({ cursor: null, baseline: { tasks: {}, projects: [] }, initialized: false });
+    });
+
+    it("round-trips cursor + baseline and reports initialized:true", () => {
+      store.saveNotifyState({ cursor: "2026-07-16T00:00:00.000Z", baseline: { tasks: { "t-1": "done" }, projects: ["p-1"] } });
+      const s = store.loadNotifyState();
+      expect(s.initialized).toBe(true);
+      expect(s.cursor).toBe("2026-07-16T00:00:00.000Z");
+      expect(s.baseline).toEqual({ tasks: { "t-1": "done" }, projects: ["p-1"] });
+    });
+  });
+
+  // ---- chats (tolerant absent + round-trip) ------------------------------
+  describe("chats", () => {
+    it("returns {} when absent", () => {
+      expect(store.loadChats()).toEqual({});
+    });
+    it("round-trips a per-job transcript", () => {
+      const map = { "Analyst - OCI": [{ role: "user", text: "hi" }, { role: "assistant", text: "hello" }] };
+      store.saveChats(map);
+      expect(store.loadChats()).toEqual(map);
+    });
+  });
+
+  // ---- activity log (tolerant absent + append-only) ----------------------
+  describe("activity log", () => {
+    it("reads empty text when absent (tolerant)", () => {
+      expect(store.readActivityText()).toBe("");
+    });
+
+    it("is append-only and stamps ts, preserving order", () => {
+      store.appendActivity({ kind: "run", runId: "r1", status: "running" });
+      store.appendActivity({ kind: "run", runId: "r1", status: "done", exitCode: 0 });
+      const lines = store.readActivityText().split(/\r?\n/).filter((l) => l.trim());
+      expect(lines).toHaveLength(2);
+      const a = JSON.parse(lines[0]);
+      const b = JSON.parse(lines[1]);
+      expect(a.status).toBe("running");
+      expect(b.status).toBe("done");
+      expect(typeof a.ts).toBe("string"); // stamped
+      expect(a.runId).toBe("r1");
+    });
+  });
+
+  // ---- usage telemetry (tolerant absent + batch append + empty no-op) ----
+  describe("telemetry", () => {
+    it("reads empty text when absent", () => {
+      expect(store.readTelemetryText()).toBe("");
+    });
+    it("appends a batch in one write; an empty batch is a no-op", () => {
+      store.appendTelemetry([]); // no-op, must not create noise
+      store.appendTelemetry([
+        { ts: "2026-07-16T00:00:00.000Z", sessionId: "s", kind: "view", surface: "insights", name: "open" },
+        { ts: "2026-07-16T00:00:01.000Z", sessionId: "s", kind: "action", surface: "insights", name: "click" },
+      ]);
+      const lines = store.readTelemetryText().split(/\r?\n/).filter((l) => l.trim());
+      expect(lines).toHaveLength(2);
+      expect(JSON.parse(lines[1]).name).toBe("click");
+    });
+  });
+
+  // ---- discovery sources (tolerant absent + version-skew round-trip) -----
+  describe("discovery sources", () => {
+    it("yields the empty registry when absent", () => {
+      expect(store.loadSources()).toEqual({ version: 1, updated: null, sources: [] });
+    });
+
+    it("round-trips a source and preserves an unmodeled (version-skew) field", () => {
+      store.saveSources({
+        sources: [
+          {
+            id: "s1", name: "Board One", type: "board", sector: "private", active: "yes",
+            urls: ["https://example.test"], cadence: "manual", instructions: "look here",
+            outputFields: ["title"], aliases: [], tracks: [], _extra: { futureKey: "keep-me" },
+          },
+        ],
+      });
+      const doc = store.loadSources();
+      expect(doc.sources).toHaveLength(1);
+      const s = doc.sources[0];
+      expect(s.id).toBe("s1");
+      expect(s.name).toBe("Board One");
+      expect(s.urls).toEqual(["https://example.test"]);
+      // the unmodeled carry-through survives the serialize/normalize round-trip
+      expect(s._extra && s._extra.futureKey).toBe("keep-me");
+    });
+  });
+
+  // ---- jobs: CRUD + guards + error paths ---------------------------------
+  describe("jobs", () => {
+    it("creates a job, reads it back, and lists it", () => {
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", status: "queued", sector: "private" });
+      expect(id).toBe("Analyst - OCI");
+      const rec = store.getJobSummary(id);
+      expect(rec.role).toBe("Analyst");
+      expect(rec.employer).toBe("OCI");
+      expect(rec.status).toBe("queued");
+      expect(store.listJobs().map((j) => j.id)).toContain(id);
+    });
+
+    it("updateJobFields changes a whitelisted field and returns the fresh DTO", () => {
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", status: "queued", sector: "private" });
+      const updated = store.updateJobFields(id, { status: "drafted" });
+      expect(updated.status).toBe("drafted");
+      expect(store.getJobSummary(id).status).toBe("drafted");
+    });
+
+    it("updateJobFields on a missing job returns null (no throw)", () => {
+      expect(store.updateJobFields("Nope - Nowhere", { status: "drafted" })).toBeNull();
+    });
+
+    it("getJob returns null for a missing job and a detail shape for a real one", () => {
+      expect(store.getJob("Nope - Nowhere")).toBeNull();
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", status: "queued", sector: "private" });
+      const detail = store.getJob(id);
+      expect(detail.role).toBe("Analyst");
+      expect(Array.isArray(detail.prep)).toBe(true);
+      expect(typeof detail.body).toBe("string");
+      expect(detail.hasSubmitted).toBe(false);
+    });
+
+    it("createJob rejects a duplicate (409) and a missing role/employer (400)", () => {
+      store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      expect(() => store.createJob({ role: "Analyst", employer: "OCI", sector: "private" })).toThrow(/already exists/);
+      try {
+        store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      } catch (e) {
+        expect(e.httpStatus).toBe(409);
+      }
+      try {
+        store.createJob({ role: "", employer: "OCI" });
+      } catch (e) {
+        expect(e.httpStatus).toBe(400);
+      }
+    });
+  });
+
+  // ---- job notes: whitelisted overwrite, never the SoT -------------------
+  describe("job notes (writeJobNote)", () => {
+    it("writes a gaps note and getJob reads it back", () => {
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      const r = store.writeJobNote(id, "gaps.md", "# Gaps\nanswered");
+      expect(r).toEqual({ ok: true, name: "gaps.md", bytes: Buffer.byteLength("# Gaps\nanswered", "utf8") });
+      expect(store.getJob(id).gaps.content).toBe("# Gaps\nanswered");
+    });
+
+    it("refuses to overwrite the SoT job file (400)", () => {
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      try {
+        store.writeJobNote(id, "Analyst.md", "malicious");
+        throw new Error("should have thrown");
+      } catch (e) {
+        expect(e.httpStatus).toBe(400);
+      }
+    });
+
+    it("refuses a note on a missing job (404)", () => {
+      try {
+        store.writeJobNote("Nope - Nowhere", "gaps.md", "x");
+        throw new Error("should have thrown");
+      } catch (e) {
+        expect(e.httpStatus).toBe(404);
+      }
+    });
+  });
+
+  // ---- blobs: byte-identical round-trip + containment --------------------
+  describe("blobs (attachments + job artifacts)", () => {
+    it("stores + reads an attachment blob byte-identically", () => {
+      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 250]);
+      store.saveAttachmentBlob("t-1", "abc.png", bytes);
+      const p = store.attachmentFilePath("t-1", "abc.png");
+      expect(p).toBeTruthy();
+      expect(fs.readFileSync(p).equals(bytes)).toBe(true);
+    });
+
+    it("contains a traversal attachment name inside the task dir", () => {
+      // The file arg is basename-stripped, so a "../../etc/passwd" can never
+      // resolve outside attachments/<taskId>/ - the returned path is the plain
+      // basename inside the task dir, never an escape.
+      const p = store.attachmentFilePath("t-1", "../../etc/passwd");
+      expect(path.basename(p)).toBe("passwd");
+      expect(p.includes(path.join("attachments", "t-1"))).toBe(true);
+    });
+
+    it("round-trips a generated job artifact byte-identically", () => {
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      const bytes = Buffer.from("%PDF-1.4 fake cv bytes \x00\x01", "binary");
+      const meta = store.saveJobArtifact(id, "CV.pdf", "application/pdf", bytes);
+      expect(meta.name).toBe("CV.pdf");
+      expect(meta.bytes).toBe(bytes.length);
+      const r = store.openJobFile(id, "CV.pdf");
+      expect(r.ok).toBe(true);
+      const chunks = [];
+      r.stream.on("data", (c) => chunks.push(c));
+      return new Promise((resolve) => {
+        r.stream.on("end", () => {
+          expect(Buffer.concat(chunks).equals(bytes)).toBe(true);
+          resolve();
+        });
+      });
+    });
+
+    it("openJobFile reports a missing folder / file with the contract statuses", () => {
+      expect(store.openJobFile("Nope - Nowhere", "x.pdf")).toEqual({ ok: false, status: 404, error: "job folder not found" });
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      expect(store.openJobFile(id, "nope.pdf")).toEqual({ ok: false, status: 404, error: "file not found" });
+    });
+  });
+});
+
+// ---- FileStore-specific: the frontmatter BYTE-CONTRACT -----------------------
+// The surgical updateFrontmatter guarantee (design 1.2.1) is a FileStore property:
+// body byte-identical, EOL + BOM handling preserved, only WRITABLE_FIELDS touched,
+// unmodeled/legacy keys untouched. PgStore reproduces the DOMAIN round-trip (above)
+// but has no markdown bytes, so this block is FileStore-only by construction.
+describe("FileStore frontmatter byte-contract", () => {
+  let root, store, jobsDir;
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "store-bytes-"));
+    jobsDir = path.join(root, "Jobs");
+    const docsDir = path.join(root, "docs");
+    const dataDir = path.join(root, "data");
+    for (const d of [jobsDir, docsDir, dataDir]) fs.mkdirSync(d, { recursive: true });
+    store = new FileStore({ jobsDir, docsDir, dataDir, deps: DEPS });
+  });
+  afterEach(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  it("preserves CRLF line endings + body bytes, changes only the one field, leaves legacy keys", () => {
+    const folder = "Analyst - OCI";
+    const dir = path.join(jobsDir, folder);
+    fs.mkdirSync(dir, { recursive: true });
+    // CRLF file with a legacy/unmodeled key (`custom_legacy`) and a body block.
+    const raw = [
+      "---",
+      "type: job",
+      "role: Analyst",
+      "employer: OCI",
+      "status: queued",
+      "custom_legacy: keep-this-untouched",
+      "tags: [job]",
+      "---",
+      "",
+      "# Analyst - OCI",
+      "",
+      "**Lead with:** the numbers",
+      "",
+    ].join("\r\n");
+    fs.writeFileSync(path.join(dir, "Analyst.md"), raw, "utf8");
+
+    // A write that flips status AND passes a NON-writable field (role) that must
+    // be ignored by the WRITABLE_FIELDS gate.
+    store.updateJobFields(folder, { status: "drafted", role: "HACKED" });
+
+    const after = fs.readFileSync(path.join(dir, "Analyst.md"), "utf8");
+    expect(after.includes("\r\n")).toBe(true); // EOL preserved (CRLF)
+    expect(after).toContain("status: drafted"); // the one field changed
+    expect(after).not.toContain("status: queued");
+    expect(after).toContain("role: Analyst"); // non-writable field NOT overwritten
+    expect(after).not.toContain("HACKED");
+    expect(after).toContain("custom_legacy: keep-this-untouched"); // legacy key untouched
+    // Body after the closing fence is byte-identical.
+    const body = after.slice(after.indexOf("---\r\n", 3) + "---\r\n".length);
+    expect(body).toBe(
+      ["", "# Analyst - OCI", "", "**Lead with:** the numbers", ""].join("\r\n"),
+    );
+  });
+
+  it("removes a field when the value is null/empty, never a delete of the file", () => {
+    const folder = "Analyst - OCI";
+    const dir = path.join(jobsDir, folder);
+    fs.mkdirSync(dir, { recursive: true });
+    const raw = ["---", "type: job", "role: Analyst", "employer: OCI", "status: submitted", "applied: 2026-07-01", "tags: [job]", "---", "", "# body", ""].join("\n");
+    fs.writeFileSync(path.join(dir, "Analyst.md"), raw, "utf8");
+    store.updateJobFields(folder, { applied: null });
+    const after = fs.readFileSync(path.join(dir, "Analyst.md"), "utf8");
+    expect(after).not.toContain("applied:");
+    expect(after).toContain("status: submitted");
+    expect(fs.existsSync(path.join(dir, "Analyst.md"))).toBe(true); // never a delete
+  });
+});

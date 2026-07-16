@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Reading the posting and the target role for this fictional demo job."},{"type":"tool_use","name":"Read","input":{"file_path":"Jobs/Demo/job-description.md"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Tailoring the application content to the posting."},{"type":"tool_use","name":"Write","input":{"file_path":"Jobs/Demo/application-content.json"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Rendering the CV and cover letter with the deterministic pipeline."},{"type":"tool_use","name":"Bash","input":{"command":"python demo/render_application.py --job Jobs/Demo"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Updating the job file with the new draft state."},{"type":"tool_use","name":"Write","input":{"file_path":"Jobs/Demo/Operations Analyst.md"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Draft complete. A fictional CV and cover letter are ready for review. This is demo content with no real data and no model spend."}]}}
+{"type":"result","subtype":"success","duration_ms":92000,"num_turns":6,"total_cost_usd":0,"result":"Draft complete (demo replay)."}

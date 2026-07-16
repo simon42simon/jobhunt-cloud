@@ -1,0 +1,53 @@
+# SYNTHETIC TEST FIXTURE - see tasks.yaml header.
+requests:
+  - id: r-1783041282682
+    text: 'Jobs IA: merge Board + Table into one Jobs page with a view switcher'
+    source: chatbot
+    created: '2026-07-03'
+    ts: '2026-07-03T01:14:42.682Z'
+    assessment: >-
+      Visual check PASSED in the owner's personal Chrome (2026-07-03): the
+      Board|Table toggle renders in the TopBar and the Table view is active with
+      group-by-status (Lead/Queued/Drafted sections). The hold the owner asked
+      for is satisfied. Closing.
+    spawned:
+      tasks:
+        - t-1783041282682
+      projects: []
+  - id: r-1783042256172
+    text: >-
+      Owner request (2026-07-02): "when I submitted, I want CTO to comment on it
+      after checking the content and answer with the assessment and the plan to
+      address it including the subtask."
+    source: chatbot
+    created: '2026-07-03'
+    ts: '2026-07-03T01:30:56.172Z'
+    assessment: >-
+      Done - both halves complete. Server append-only comments API +
+      assess-ticket routine (earlier) and now the frontend: ChatCapture
+      auto-fires api.runRoutine(assess-ticket, id) after Queue it (surfaced in
+      RunPanel; 429 degrades softly, review-confirmed) and renders task.comments
+      CTO verdicts in the queue. Gate green (268). Closing.
+    spawned:
+      tasks:
+        - t-1783042256172
+      projects: []
+  - id: r-1783097277925
+    text: >-
+      Owner request (2026-07-03): "I still cannot see how the prompt is
+      received, how CTO break down, how task and projects are generated, etc.
+      This whole flow should be recorded. IDK where - tasks? projects? prompt
+      table?"
+    source: session
+    created: '2026-07-03'
+    ts: '2026-07-03T16:47:57.925Z'
+    assessment: >-
+      Phase 1 backend build dispatched to software-architect: the intake ledger
+      (docs/requests.yaml + /api/requests) and the project PM/RACI fields are
+      built TOGETHER per the signed-off design
+      (docs/research/2026-07-03-operational-management.md), so they share one
+      data model. In_progress.
+    spawned:
+      tasks:
+        - t-1783097277925
+      projects: []

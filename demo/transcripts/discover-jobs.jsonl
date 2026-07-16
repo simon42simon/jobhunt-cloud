@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Scanning the fictional demo boards for new leads."},{"type":"tool_use","name":"Grep","input":{"pattern":"analyst","path":"demo/boards"}}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Triaging candidates and mapping each to a positioning track."}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Discovery complete. Filed 3 fictional leads for review. Demo content only, no live fetch, no model spend."}]}}
+{"type":"result","subtype":"success","duration_ms":41000,"num_turns":4,"total_cost_usd":0,"result":"Discovery complete (demo replay)."}

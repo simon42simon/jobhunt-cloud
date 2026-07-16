@@ -1,0 +1,15 @@
+{
+  "_comment": "RC-3 / SIM-87 I8 - PLACEHOLDER config for the cloud image + the clean-repo extraction (I9). The committed config.json embeds the owner's real vault path; the Docker image ships THIS file as config.json instead. On a PgStore (cloud) deployment jobsDir/dataDir are unused (Postgres is canonical), but loadConfig still requires jobsDir - so a placeholder is enough. Local FileStore users copy this to config.local.json and set real paths.",
+  "jobsDir": "/data/Jobs",
+  "dataDir": "/data",
+  "serverPort": 8787,
+  "serverHost": "0.0.0.0",
+  "weeklyTarget": 5,
+  "claudeAllowedTools": "Read,Glob,Grep,Edit,Write,WebSearch,WebFetch,Bash,Task,TodoWrite",
+  "claudeBin": "",
+  "maxConcurrentRuns": 4,
+  "attachmentMaxBytes": 5242880,
+  "attachmentMaxCount": 6,
+  "attachmentMimeAllowlist": ["image/png", "image/jpeg", "image/gif", "image/webp"],
+  "runnerQueueMaxInflight": 20
+}

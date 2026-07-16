@@ -1,0 +1,11 @@
+{
+  "_comment": "COMMITTED PLACEHOLDER forbidden-substrings list (RC-3 / SIM-87 I6, guardian MF-11). This is a SAMPLE of clearly-fictional terms, safe to ship in the public repo, enough to exercise demo/guard.mjs in CI. The REAL list (owner's real name + real employers - PII) lives at demo/forbidden.local.json (gitignored) or the path in DEMO_FORBIDDEN_FILE, applied only on the owner's box at demo build/reset. Never put real PII here.",
+  "terms": [
+    "REAL_OWNER_NAME_PLACEHOLDER",
+    "REAL_EMPLOYER_PLACEHOLDER",
+    "OneDrive",
+    "professional-development",
+    "ops/facts",
+    "master-profile"
+  ]
+}

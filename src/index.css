@@ -1,0 +1,201 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #0b0f17;
+  --color-panel: #111725;
+  --color-panel-2: #161e2e;
+  --color-edge: #243049;
+  --color-muted: #8a96ad;
+  --color-text: #e6ebf4;
+  /* Indigo nudged slightly darker so white text on accent fills (active tab,
+     primary buttons) clears WCAG AA 4.5:1 (was #6366f1 at 4.47:1). */
+  --color-accent: #5a5df0;
+  /* --color-accent is tuned for a solid FILL (buttons, active tab) with white
+     text on top - as small TEXT on the dark panel itself it only clears
+     3.63:1 (panel) / 3.38:1 (panel-2), both failing AA's 4.5:1. Use this
+     lighter tint (indigo-300, already the app's established "accent-ish"
+     link/code color) for accent-colored TEXT - links, arrows, small labels -
+     and keep --color-accent for fills. Verified 8.98:1 / 8.37:1 against the
+     panel tokens via the same contrast script as src/lib/statusColors.ts. */
+  --color-accent-text: #a5b4fc;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+/* Keyboard accessibility: visible focus ring on keyboard nav only (not mouse). */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    "Apple Color Emoji", "Segoe UI Emoji";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin, dark scrollbars to match the command-center aesthetic. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2b3650 transparent;
+}
+*::-webkit-scrollbar {
+  height: 10px;
+  width: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2b3650;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3a4660;
+}
+
+kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--color-panel-2);
+  border: 1px solid var(--color-edge);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 1px 6px;
+  color: var(--color-muted);
+}
+
+/* Rendered docs (blueprint, changelog) - a clean Confluence-like reading view. */
+.prose-doc {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #c6d0e0;
+}
+.prose-doc h1 {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0 0 8px;
+  letter-spacing: -0.01em;
+}
+.prose-doc h2 {
+  font-size: 19px;
+  font-weight: 650;
+  color: var(--color-text);
+  margin: 30px 0 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-edge);
+}
+.prose-doc h3 {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--color-text);
+  margin: 22px 0 6px;
+}
+.prose-doc h4 {
+  font-size: 13px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #9aa6bd;
+  margin: 18px 0 6px;
+}
+.prose-doc p {
+  margin: 10px 0;
+}
+.prose-doc a {
+  color: var(--color-accent-text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose-doc strong {
+  color: var(--color-text);
+  font-weight: 650;
+}
+.prose-doc ul,
+.prose-doc ol {
+  margin: 10px 0;
+  padding-left: 22px;
+}
+.prose-doc li {
+  margin: 4px 0;
+}
+.prose-doc ul {
+  list-style: disc;
+}
+.prose-doc ol {
+  list-style: decimal;
+}
+.prose-doc code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+  background: var(--color-panel-2);
+  border: 1px solid var(--color-edge);
+  border-radius: 5px;
+  padding: 1px 5px;
+  color: var(--color-accent-text);
+}
+.prose-doc pre {
+  background: #0c1220;
+  border: 1px solid var(--color-edge);
+  border-radius: 10px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 14px 0;
+}
+.prose-doc pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #c6d0e0;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.prose-doc blockquote {
+  border-left: 3px solid var(--color-accent);
+  background: #141c2c;
+  margin: 14px 0;
+  padding: 8px 14px;
+  border-radius: 0 8px 8px 0;
+  color: #9aa6bd;
+}
+.prose-doc blockquote p {
+  margin: 4px 0;
+}
+.prose-doc hr {
+  border: none;
+  border-top: 1px solid var(--color-edge);
+  margin: 24px 0;
+}
+.prose-doc table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 14px 0;
+  font-size: 13px;
+}
+.prose-doc th,
+.prose-doc td {
+  border: 1px solid var(--color-edge);
+  padding: 7px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+.prose-doc th {
+  background: var(--color-panel-2);
+  color: var(--color-text);
+  font-weight: 600;
+}
+.prose-doc tbody tr:nth-child(even) td {
+  background: #0f1623;
+}

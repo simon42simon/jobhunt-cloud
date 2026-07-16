@@ -1,0 +1,23 @@
+node_modules/
+# Root build output only - NOT the vendored ssc-ui/dist (that ships).
+/dist/
+*.local
+.DS_Store
+
+# Local config with real paths / secrets - never committed. The repo ships
+# config.example.json; copy it to config.local.json (or config.json) locally.
+config.json
+config.local.json
+
+# Secrets / env - never committed
+.env
+.env.*
+cookies.txt
+
+# Demo forbidden-substrings list: only the committed demo/forbidden.sample.json
+# placeholder is public; a real one (if ever created) stays local.
+demo/forbidden.local.json
+
+# Runtime output + logs
+ops/outputs/
+*.log

@@ -1,0 +1,180 @@
+{
+  "_readme": [
+    "Governance manifest for the product routines that run AS an owning agent (ADR-015).",
+    "The routine runner (server/index.js ROUTINES) binds each PRODUCT routine to a Career",
+    "Delivery agent via `claude --agent <id>`, so LOAD-BEARING behavioral rules now sit on",
+    "the runtime path inside ~/.claude/agents/<id>.md - files this repo does NOT track and",
+    "that are editable outside any repo diff or release gate (security Finding 2a).",
+    "",
+    "tests/bound-agents-governance.test.js reads each bound agent file from",
+    "~/.claude/agents/<id>.md (resolved via os.homedir()) and FAILS if any required",
+    "guardrail below is absent - so a silent softening of a load-bearing rule turns CI red.",
+    "",
+    "TO ADD A NEWLY-BOUND AGENT: add one entry under `boundAgents` keyed by its agents.yaml",
+    "id, with its `routines` (the ROUTINES ids it owns) and its `guardrails`. The test",
+    "cross-checks that the set of keys here EXACTLY equals the set of `agent` fields on the",
+    "scope:job/global product routines in server/index.js, so a new binding without a",
+    "manifest entry (or an orphan manifest entry) also fails.",
+    "",
+    "GUARDRAIL SEMANTICS: each guardrail's `pattern` is a JS regex source string, compiled",
+    "with `flags`. It must MATCH the agent file. Patterns use \\s+ between words so benign",
+    "reflow (e.g. frontmatter line-wrapping) does not false-red, but softening the actual",
+    "guarantee (removing/negating the load-bearing token) does. When a phrase is",
+    "legitimately reworded, update the pattern here IN THE SAME DIFF - that change is the",
+    "point: it surfaces the softening for review instead of letting it pass silently."
+  ],
+  "boundAgents": {
+    "job-search-scout": {
+      "routines": ["discover-jobs", "discover-jobs-source", "propose-instructions"],
+      "guardrails": [
+        {
+          "id": "discovery-only-no-writing",
+          "description": "Scout finds/qualifies but does NOT write CVs or cover letters (that is application-writer). Role-boundary lock.",
+          "pattern": "do\\s+not\\s+write\\s+CVs\\s+or\\s+cover\\s+letters",
+          "flags": "i"
+        },
+        {
+          "id": "browser-personal-chrome",
+          "description": "Must land on the user's PERSONAL / default Chrome before driving the browser.",
+          "pattern": "personal\\s*/\\s*default\\s+Chrome",
+          "flags": "i"
+        },
+        {
+          "id": "browser-never-maplearmor",
+          "description": "NEVER the maplearmor (work) browser, and never fall back to it.",
+          "pattern": "never\\s+use\\s+the\\s+.?maplearmor.?\\s*\\(work\\)",
+          "flags": "i"
+        },
+        {
+          "id": "data-sovereignty-off-machine",
+          "description": "The vault is local; never send it off-machine.",
+          "pattern": "never\\s+send\\s+it\\s+off-machine",
+          "flags": "i"
+        },
+        {
+          "id": "account-safety-no-cookie-scraper",
+          "description": "Avoid LinkedIn cookie-scraper actors (account-ban risk); prefer minimal-scope, no-credential sources.",
+          "pattern": "cookie-scraper",
+          "flags": "i"
+        },
+        {
+          "id": "no-em-dash-rule",
+          "description": "The no-em-dashes rule must remain declared in the file.",
+          "pattern": "[Nn]o\\s+em\\s+dashes",
+          "flags": ""
+        }
+      ]
+    },
+    "application-writer": {
+      "routines": ["first-draft-job", "finalize-job", "merge-application-pdf", "draft-follow-up"],
+      "guardrails": [
+        {
+          "id": "no-auto-submit",
+          "description": "Never auto-submit an application to an employer; the human submits.",
+          "pattern": "never\\s+auto-submit",
+          "flags": "i"
+        },
+        {
+          "id": "human-submits",
+          "description": "The human is the one who submits (positive complement of no-auto-submit).",
+          "pattern": "human\\s+submits",
+          "flags": "i"
+        },
+        {
+          "id": "generate-from-facts-no-hand-edit",
+          "description": "Generate FROM facts; never hand-write or hand-edit a rendered CV / cover letter.",
+          "pattern": "never\\s+hand-write\\s+or\\s+hand-edit",
+          "flags": "i"
+        },
+        {
+          "id": "local-only-no-cloud-write",
+          "description": "Local-only: cloud / scheduled runs cannot write the OneDrive vault.",
+          "pattern": "cloud\\s*/\\s*scheduled\\s+runs\\s+cannot\\s+write\\s+the\\s+OneDrive\\s+vault",
+          "flags": "i"
+        },
+        {
+          "id": "browser-personal-chrome",
+          "description": "Must select the user's PERSONAL / default Chrome before driving the browser.",
+          "pattern": "personal\\s*/\\s*default\\s+Chrome",
+          "flags": "i"
+        },
+        {
+          "id": "browser-never-maplearmor",
+          "description": "NEVER the maplearmor (work) browser, and never fall back to it.",
+          "pattern": "never\\s+use\\s+the\\s+.?maplearmor.?\\s*\\(work\\)",
+          "flags": "i"
+        },
+        {
+          "id": "no-em-dash-rule",
+          "description": "The no-em-dashes rule must remain declared in the file.",
+          "pattern": "[Nn]o\\s+em\\s+dashes",
+          "flags": ""
+        }
+      ]
+    },
+    "product-manager": {
+      "routines": ["usage-insights"],
+      "guardrails": [
+        {
+          "id": "what-why-not-how-role-boundary",
+          "description": "PM owns the what/why and hands the how to the architect/engineers - the role-boundary lock that keeps the usage-insights routine to analysis + recommendations and out of writing code.",
+          "pattern": "hand\\s+the\\s+how\\s+to\\s+the\\s+architect\\s+and\\s+engineers",
+          "flags": "i"
+        },
+        {
+          "id": "evidence-over-opinion",
+          "description": "Decide from the data, not hunches - load-bearing for a routine that turns telemetry into recommendations.",
+          "pattern": "[Ee]vidence\\s+over\\s+opinion",
+          "flags": ""
+        },
+        {
+          "id": "no-invent-user-demand",
+          "description": "Do not invent user demand - ground it in the workflow and the data. Guards the evidence-backed-ticket discipline.",
+          "pattern": "not\\s+invent\\s+user\\s+demand",
+          "flags": "i"
+        },
+        {
+          "id": "frontmatter-sot-no-second-db",
+          "description": "Markdown frontmatter is the SoT; never propose a second database - the no-parallel-store guarantee the routine's report + tickets must respect.",
+          "pattern": "never\\s+propose\\s+a\\s+second\\s+database",
+          "flags": "i"
+        },
+        {
+          "id": "no-em-dash-rule",
+          "description": "The no-em-dashes rule must remain declared in the file.",
+          "pattern": "[Nn]o\\s+em\\s+dashes",
+          "flags": ""
+        }
+      ]
+    },
+    "interview-offer-coach": {
+      "routines": ["interview-prep", "interview-prep-refine", "offer-prep"],
+      "guardrails": [
+        {
+          "id": "ground-in-facts-no-fabricate",
+          "description": "Generate-from-facts: ground everything in Simon's real record; never fabricate a story, a metric, or a competing offer - the load-bearing rule for late-stage prep + offer analysis.",
+          "pattern": "never\\s+fabricate\\s+a\\s+story",
+          "flags": "i"
+        },
+        {
+          "id": "local-only-off-machine",
+          "description": "Local-only / data sovereignty: never send Simon's data off-machine beyond read-only research.",
+          "pattern": "never\\s+send\\s+Simon.?s\\s+data\\s+off-machine",
+          "flags": "i"
+        },
+        {
+          "id": "browser-never-maplearmor",
+          "description": "Hard browser rule: NEVER the maplearmor (work) browser for market-rate / company research, and never fall back to it.",
+          "pattern": "never\\s+use\\s+the\\s+.?maplearmor.?\\s*\\(work\\)",
+          "flags": "i"
+        },
+        {
+          "id": "no-em-dash-rule",
+          "description": "The no-em-dashes rule must remain declared in the file.",
+          "pattern": "[Nn]o\\s+em\\s+dashes",
+          "flags": ""
+        }
+      ]
+    }
+  }
+}
