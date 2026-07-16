@@ -43,6 +43,42 @@ export const CSP_DIRECTIVES = {
   frameAncestors: ["'none'"],
 };
 
+// ---- security-headers hardening (pure, testable) --------------------------
+// G10 (RC-4): browser/transport hardening is DECOUPLED from auth so it lands on
+// EVERY deployment surface - local loopback (harmless), private cloud (auth on),
+// and the PUBLIC DEMO (auth off but internet-facing, where it is essential and was
+// previously absent because helmet was gated on auth.enabled). Only the
+// CROSS-ORIGIN ISOLATION headers (COOP/CORP) stay OFF: they would break the on-box
+// fleet's legitimate cross-origin reads (the original reason helmet was auth-gated)
+// and are NOT part of the demo threat model - which is XSS (-> CSP), clickjacking
+// (-> frame-ancestors 'none' + X-Frame-Options DENY) and MIME-sniff (-> nosniff).
+
+// True when a TLS terminator sits in front, so HSTS becomes meaningful. Either an
+// explicit JOBHUNT_TLS truthy flag, or the JOBHUNT_TRUST_PROXY opt-in a cloud TLS
+// front sets. On plain loopback (neither set) HSTS is omitted so we never pin
+// localhost to https.
+export function isBehindTls(env = {}) {
+  const tls = String(env.JOBHUNT_TLS || "").trim().toLowerCase();
+  if (tls === "1" || tls === "true" || tls === "on" || tls === "yes") return true;
+  const tp = String(env.JOBHUNT_TRUST_PROXY || "").trim().toLowerCase();
+  return tp !== "" && tp !== "0" && tp !== "false";
+}
+
+// Build the helmet options. Pure so tests assert the posture without a socket.
+// CSP uses the Vite-proven directives (preserved verbatim); frame protection is
+// DENY (stricter than helmet's SAMEORIGIN default) and mirrored by frameAncestors
+// 'none' in the CSP; COOP/CORP are disabled (on-box cross-origin reads); HSTS is
+// applied only under TLS.
+export function buildHelmetOptions({ behindTls = false } = {}) {
+  return {
+    contentSecurityPolicy: { directives: CSP_DIRECTIVES },
+    frameguard: { action: "deny" },
+    crossOriginOpenerPolicy: false,
+    crossOriginResourcePolicy: false,
+    hsts: behindTls ? { maxAge: 15552000, includeSubDomains: true } : false,
+  };
+}
+
 // ---- auth config resolution (pure) ----------------------------------------
 
 // Read <dataDir>/auth.json if present. Returns the parsed record only when it

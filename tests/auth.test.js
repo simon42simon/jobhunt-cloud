@@ -12,6 +12,9 @@ import {
   parseCookies,
   parseCorsOrigins,
   isAuthOpenPath,
+  isBehindTls,
+  buildHelmetOptions,
+  CSP_DIRECTIVES,
   SESSION_COOKIE,
   SESSION_TTL_MS,
 } from "../server/auth.js";
@@ -50,6 +53,8 @@ async function loadApp(envOverrides = {}) {
     "JOBHUNT_CORS_ORIGINS",
     "JOBHUNT_AUTH_RATELIMIT_MAX",
     "JOBHUNT_AUTH_RATELIMIT_WINDOW_MS",
+    "JOBHUNT_TLS",
+    "JOBHUNT_TRUST_PROXY",
   ]) {
     delete process.env[k];
   }
@@ -112,6 +117,28 @@ describe("auth pure helpers", () => {
     );
   });
 
+  it("isBehindTls: false on plain loopback, true on JOBHUNT_TLS or a trust-proxy opt-in", () => {
+    expect(isBehindTls({})).toBe(false);
+    expect(isBehindTls({ JOBHUNT_TLS: "1" })).toBe(true);
+    expect(isBehindTls({ JOBHUNT_TLS: "true" })).toBe(true);
+    expect(isBehindTls({ JOBHUNT_TRUST_PROXY: "1" })).toBe(true);
+    expect(isBehindTls({ JOBHUNT_TRUST_PROXY: "loopback" })).toBe(true);
+    expect(isBehindTls({ JOBHUNT_TRUST_PROXY: "0" })).toBe(false);
+    expect(isBehindTls({ JOBHUNT_TRUST_PROXY: "false" })).toBe(false);
+  });
+
+  it("buildHelmetOptions: Vite CSP + frame DENY always; COOP/CORP off; HSTS only under TLS", () => {
+    const off = buildHelmetOptions({ behindTls: false });
+    expect(off.contentSecurityPolicy.directives).toBe(CSP_DIRECTIVES);
+    expect(off.frameguard).toEqual({ action: "deny" });
+    expect(off.crossOriginOpenerPolicy).toBe(false);
+    expect(off.crossOriginResourcePolicy).toBe(false);
+    expect(off.hsts).toBe(false); // no HSTS without TLS (never pin localhost to https)
+    const on = buildHelmetOptions({ behindTls: true });
+    expect(on.hsts).toMatchObject({ maxAge: expect.any(Number) });
+    expect(on.hsts.maxAge).toBeGreaterThan(0);
+  });
+
   it("loadAuthFile is read from DATA_DIR and feeds resolveAuth (file source)", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jh-auth-file-"));
     fs.writeFileSync(
@@ -144,11 +171,89 @@ describe("auth OFF (default) = today's behavior (regression)", () => {
     expect(res.body).toHaveProperty("statuses");
   });
 
-  it("no auth endpoints exist and no CSP header is emitted (helmet off)", async () => {
+  it("no auth endpoints exist (login gate stays feature-flagged off)", async () => {
     const status = await request(app).get("/api/auth/status");
     expect(status.status).toBe(404);
+  });
+
+  it("still emits security headers with auth off (G10: hardening is decoupled from the auth gate)", async () => {
+    // Pre-G10 this asserted the CSP header was ABSENT with auth off; that left the
+    // public demo (auth off, internet-facing) unprotected. Hardening now always on.
     const cfg = await request(app).get("/api/config");
-    expect(cfg.headers["content-security-policy"]).toBeUndefined();
+    expect(cfg.headers["content-security-policy"]).toMatch(/default-src 'self'/);
+    expect(cfg.headers["x-frame-options"]).toBe("DENY");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// G10 (RC-4): security-headers hardening is DECOUPLED from auth. The PUBLIC DEMO
+// runs with auth OFF but is internet-facing, so helmet/CSP/frame protection MUST
+// be present even when auth is off. RED-CHECKED: against the old auth-gated
+// mounting (helmet inside `if (auth.enabled)`) every assertion in this block fails
+// (no CSP / X-Frame-Options / nosniff header when auth is off), proving the
+// decoupling - not the import - is what protects the demo surface.
+describe("security headers hardening (auth OFF = the public-demo surface)", () => {
+  let app;
+  let tmpRoot;
+  beforeAll(async () => {
+    ({ app, tmpRoot } = await loadApp()); // no auth, no TLS - the local/demo default
+  });
+  afterAll(() => {
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  });
+
+  it("emits the Vite-tuned CSP even with auth off", async () => {
+    const res = await request(app).get("/api/config");
+    expect(res.status).toBe(200); // no auth gate - the demo stays anonymously reachable
+    expect(res.headers["content-security-policy"]).toBeTruthy();
+    expect(res.headers["content-security-policy"]).toMatch(/default-src 'self'/);
+    expect(res.headers["content-security-policy"]).toMatch(/frame-ancestors 'none'/);
+  });
+
+  it("emits anti-clickjacking (X-Frame-Options DENY) + nosniff + referrer-policy with auth off", async () => {
+    const res = await request(app).get("/api/config");
+    expect(res.headers["x-frame-options"]).toBe("DENY");
+    expect(res.headers["x-content-type-options"]).toBe("nosniff");
+    expect(res.headers["referrer-policy"]).toBeTruthy();
+  });
+
+  it("omits HSTS when not behind TLS (loopback/local) but keeps the rest", async () => {
+    const res = await request(app).get("/api/config");
+    expect(res.headers["strict-transport-security"]).toBeUndefined();
+    expect(res.headers["content-security-policy"]).toBeTruthy();
+  });
+
+  it("leaves cross-origin isolation (COOP/CORP) OFF so on-box fleet cross-origin reads are unaffected", async () => {
+    const res = await request(app).get("/api/config");
+    expect(res.headers["cross-origin-resource-policy"]).toBeUndefined();
+    expect(res.headers["cross-origin-opener-policy"]).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The real public-demo topology: auth OFF (a public demo cannot require login) but
+// behind a TLS terminator (Railway). HSTS becomes meaningful and must appear WHILE
+// auth stays off and the surface stays anonymously reachable.
+describe("security headers hardening (auth OFF, behind TLS = public demo on Railway)", () => {
+  let app;
+  let tmpRoot;
+  beforeAll(async () => {
+    ({ app, tmpRoot } = await loadApp({ JOBHUNT_TLS: "1" }));
+  });
+  afterAll(() => {
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  });
+
+  it("adds HSTS under TLS while auth stays off and the demo stays reachable", async () => {
+    const res = await request(app).get("/api/config");
+    expect(res.status).toBe(200); // still no auth gate
+    expect(res.headers["strict-transport-security"]).toMatch(/max-age=\d+/);
+    expect(res.headers["content-security-policy"]).toMatch(/default-src 'self'/);
+    expect(res.headers["x-frame-options"]).toBe("DENY");
   });
 });
 

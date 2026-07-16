@@ -53,7 +53,9 @@ node ops/auth-setup.mjs        # prompts (hidden); writes an Argon2id hash to
                                # <dataDir>/auth.json (0600, OUTSIDE the git tree)
 ```
 
-Once `auth.json` exists the server enables auth on next start: `helmet` + CSP headers on, and every `/api/*` route 401s without a valid session cookie. `POST /api/auth/login {passphrase}` (rate-limited) sets an `httpOnly` `sameSite=lax` session cookie; `POST /api/auth/logout` clears it; `GET /api/auth/status` reports posture.
+Once `auth.json` exists the server enables auth on next start: every `/api/*` route 401s without a valid session cookie. `POST /api/auth/login {passphrase}` (rate-limited) sets an `httpOnly` `sameSite=lax` session cookie; `POST /api/auth/logout` clears it; `GET /api/auth/status` reports posture.
+
+**Security headers are always on (G10, RC-4), independent of auth.** `helmet` with the Vite-tuned CSP, `X-Frame-Options: DENY` + `frame-ancestors 'none'` (anti-clickjacking), `nosniff` and `referrer-policy` are emitted on **every** deployment surface - local loopback, private cloud, and the public demo (which runs with auth off but is internet-facing). Cross-origin isolation (COOP/CORP) stays off so the on-box fleet's cross-origin reads are unaffected. HSTS is added only under TLS (`JOBHUNT_TLS=1` or `JOBHUNT_TRUST_PROXY`).
 
 **Enabling auth in the cloud (12-factor, no local file):**
 
@@ -63,7 +65,8 @@ Once `auth.json` exists the server enables auth on next start: `helmet` + CSP he
 | `JOBHUNT_AUTH_HASH=$argon2id$...` | The passphrase hash (from `ops/auth-setup.mjs`). |
 | `JOBHUNT_AUTH_SECRET=<hex>` | Optional session-signing secret; if omitted a stable one is derived from the hash. |
 | `JOBHUNT_HOST` / `serverHost` | Bind address (default loopback; set for the exposed host). |
-| `JOBHUNT_TRUST_PROXY=1` | Behind a TLS terminator, so `secure` cookies + the rate-limit IP key are correct. |
+| `JOBHUNT_TRUST_PROXY=1` | Behind a TLS terminator, so `secure` cookies + the rate-limit IP key + HSTS are correct. |
+| `JOBHUNT_TLS=1` | Assert TLS in front (adds HSTS) without granting proxy trust; either this or `JOBHUNT_TRUST_PROXY` turns HSTS on. |
 | `JOBHUNT_CORS_ORIGINS=https://a,https://b` | Optional cross-origin allowlist; empty ⇒ no CORS headers (default). |
 | `JOBHUNT_AUTH=off` | Force auth off even if a hash is present (escape hatch). |
 

@@ -53,7 +53,8 @@ import {
   installAuthRoutes,
   createAuthGate,
   parseCorsOrigins,
-  CSP_DIRECTIVES,
+  buildHelmetOptions,
+  isBehindTls,
 } from "./auth.js";
 // Storage seam (RC-3 / SIM-87, ADR-025). Every persistent read/write goes through
 // `store` so a cloud deployment can swap FileStore for PgStore without touching a
@@ -312,29 +313,42 @@ const app = express();
 // take a scoped per-origin decision through security review, never the
 // wildcard. Posture pinned by tests/cors-origin.test.js.
 
-// ---- security hardening (feature-flagged; SIM-85 / RC-1, ADR-024) ----------
-// DEFAULT POSTURE (no hash configured, JOBHUNT_AUTH unset) is BYTE-IDENTICAL to
-// the historical loopback-dev behavior: resolveAuth returns {enabled:false}, so
-// helmet, the auth routes, and the gate below are all skipped, and the CORS
-// allowlist is empty (no headers). Hardening turns on together only for the
-// cloud / LAN-exposed path, when a passphrase hash is present (ops/auth-setup.mjs
-// writes it to <DATA_DIR>/auth.json, OUTSIDE the git tree, or JOBHUNT_AUTH_HASH
-// provides it) or JOBHUNT_AUTH=required. Gating helmet with auth is deliberate:
-// the local fleet reads this bridge cross-origin (product-hub on :8787), and a
-// helmet CORP/CSP posture must not land on that on-box path - only on the
-// exposed deployment. resolveAuth throws loudly if JOBHUNT_AUTH=required but
-// nothing is configured (fail-fast misconfig).
+// ---- security hardening (SIM-85 / RC-1, ADR-024; G10 decoupling RC-4) -------
+// resolveAuth throws loudly if JOBHUNT_AUTH=required but nothing is configured
+// (fail-fast misconfig). AUTH is still feature-flagged (default OFF = the
+// historical loopback-dev posture; the login gate + rate limiter + secure-cookie
+// flags all stay gated on auth.enabled below).
 const auth = resolveAuth({ env: process.env, dataDir: DATA_DIR });
+
+// Trust a front proxy's X-Forwarded-* only on explicit opt-in (a cloud TLS
+// terminator) so req.ip (rate-limit key), secure-cookie detection AND HSTS
+// posture are correct without a spoofable default on the loopback path. Hoisted
+// out of the auth gate because the PUBLIC DEMO runs behind TLS with auth OFF and
+// still needs the terminator recognised (protocol + HSTS).
+if (process.env.JOBHUNT_TRUST_PROXY) {
+  const tp = process.env.JOBHUNT_TRUST_PROXY;
+  app.set("trust proxy", /^\d+$/.test(tp) ? Number(tp) : tp);
+}
+
+// SECURITY-HEADERS HARDENING - ALWAYS ON (G10 fix, RC-4, guardian
+// 2026-07-16-rc2-rc4-security-review.md). helmet's CSP (Vite-tuned), X-Frame-Options
+// DENY + frame-ancestors 'none' (anti-clickjacking), nosniff and referrer-policy are
+// DECOUPLED from auth so they protect EVERY deployment surface: local loopback
+// (headers are harmless there), private cloud (auth on), and the PUBLIC DEMO (auth
+// off but internet-facing - a public demo cannot require a login and stay public, so
+// gating helmet on auth left the demo with NO CSP/frame protection and clickjackable).
+// COOP/CORP cross-origin isolation stays OFF (buildHelmetOptions) so the on-box
+// fleet's legitimate cross-origin reads are unaffected - that was the sole reason
+// helmet used to be auth-gated, and it is preserved. HSTS is only meaningful under
+// TLS, so it is emitted only when the app knows it sits behind a TLS terminator
+// (JOBHUNT_TLS or JOBHUNT_TRUST_PROXY); on plain loopback HSTS is omitted.
+const behindTls = isBehindTls(process.env);
+app.use(helmet(buildHelmetOptions({ behindTls })));
+console.log(
+  `[jobhunt] security headers ON (helmet CSP + frame-DENY + nosniff; HSTS ${behindTls ? "on" : "off"})`,
+);
 if (auth.enabled) {
-  // Trust a front proxy's X-Forwarded-* only on explicit opt-in (a cloud TLS
-  // terminator) so req.ip (rate-limit key) and secure-cookie detection are
-  // correct, without a spoofable default on the loopback path.
-  if (process.env.JOBHUNT_TRUST_PROXY) {
-    const tp = process.env.JOBHUNT_TRUST_PROXY;
-    app.set("trust proxy", /^\d+$/.test(tp) ? Number(tp) : tp);
-  }
-  app.use(helmet({ contentSecurityPolicy: { directives: CSP_DIRECTIVES } }));
-  console.log(`[jobhunt] auth ENABLED (hash source: ${auth.source}); helmet + CSP on`);
+  console.log(`[jobhunt] auth ENABLED (hash source: ${auth.source})`);
 }
 // CORS stays OFF by default (deliberate removal, t-1783186106119). An operator
 // may opt SPECIFIC origins back in via JOBHUNT_CORS_ORIGINS (comma-separated)
