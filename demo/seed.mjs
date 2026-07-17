@@ -49,7 +49,22 @@ const TRACKS = [
 ];
 const SECTORS = ["private", "municipal", "provincial", "federal", "bps", "nonprofit"];
 const FITS = ["strong", "moderate", "stretch"];
-const STATUSES = ["lead", "queued", "drafted", "ready", "submitted", "interview", "offer"];
+
+// The PM-spec funnel (audit/2026-07-16-rc4-demo-journey-spec.md section 3.1):
+// ~23 jobs shaped like a real search - wide at the top, narrow at the bottom,
+// every status column populated (an all-green board reads as fake; the two
+// rejected + two closed are the "honest losses" the archive toggle shows).
+const FUNNEL = [
+  ["lead", 5],
+  ["queued", 3],
+  ["drafted", 2],
+  ["ready", 2],
+  ["submitted", 4],
+  ["interview", 2],
+  ["offer", 1],
+  ["rejected", 2],
+  ["closed", 2],
+];
 
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 
@@ -61,12 +76,15 @@ const dateStamp = (daysAgo) => dayISO(daysAgo).slice(0, 10);
 
 // ---- dataset generator ------------------------------------------------------
 // Returns a plain, deterministic domain dataset. `seedVersion` (int) pins the RNG.
-export function generate(seedVersion = 1, { jobCount = 12 } = {}) {
+export function generate(seedVersion = 1) {
   const rng = mulberry32(1000 + Number(seedVersion || 1));
+
+  // Expand the funnel into a flat, deterministic status list (23 jobs).
+  const statusList = FUNNEL.flatMap(([status, n]) => Array.from({ length: n }, () => status));
 
   const jobs = [];
   const usedIds = new Set();
-  for (let i = 0; i < jobCount; i++) {
+  for (let i = 0; i < statusList.length; i++) {
     const role = pick(rng, ROLES);
     let employer = pick(rng, EMPLOYERS);
     let id = `${role} - ${employer}`;
@@ -78,16 +96,20 @@ export function generate(seedVersion = 1, { jobCount = 12 } = {}) {
     }
     if (usedIds.has(id)) continue;
     usedIds.add(id);
-    const status = STATUSES[i % STATUSES.length];
+    const status = statusList[i];
     const sector = pick(rng, SECTORS);
-    const track = pick(rng, TRACKS);
-    const fit = pick(rng, FITS);
-    const applied = ["submitted", "interview", "offer"].includes(status) ? dateStamp(20 - i) : null;
+    // Every track appears at least twice (spec 3.1: track filters + the Insights
+    // breakdown must look alive) - round-robin the first 2 passes, then random.
+    const track = i < TRACKS.length * 2 ? TRACKS[i % TRACKS.length] : pick(rng, TRACKS);
+    // Fit skews strong/moderate near the top of the funnel (a real user doesn't
+    // queue jobs they don't fit); one deliberate stretch lands via the rng tail.
+    const fit = ["lead", "queued"].includes(status) ? pick(rng, ["strong", "strong", "moderate"]) : pick(rng, FITS);
+    const applied = ["submitted", "interview", "offer", "rejected"].includes(status) ? dateStamp(20 - i) : null;
     // Pre-baked FICTIONAL artifacts for jobs that have progressed far enough.
     const person = `${pick(rng, FIRST_NAMES)} ${pick(rng, LAST_NAMES)}`;
     const artifacts = [];
     const notes = [];
-    if (["drafted", "ready", "submitted", "interview", "offer"].includes(status)) {
+    if (["drafted", "ready", "submitted", "interview", "offer", "rejected"].includes(status)) {
       // .pdf so the readiness derivation (hasCV/hasCoverLetter want a docx/pdf named
       // cv/cover) lights up, exactly like a real rendered application. The bytes are
       // fictional demo content, not a real PDF - the app never parses them.
@@ -125,7 +147,11 @@ export function generate(seedVersion = 1, { jobCount = 12 } = {}) {
       fit,
       status,
       sector,
-      deadline: status === "lead" || status === "queued" ? dateStamp(-14 - i) : null,
+      // Far-future ON PURPOSE (deterministic, never expires): a lead/queued job
+      // with a passed deadline is auto-closed by the lazy sweep on the first
+      // GET /api/jobs, which silently ate the top of the funnel when these were
+      // stamped relative to the fixed ANCHOR (the demo degraded as days passed).
+      deadline: status === "lead" || status === "queued" ? `2099-12-${String(1 + (i % 28)).padStart(2, "0")}` : null,
       link: `https://demo.example.test/postings/${i + 1}`,
       source: "demo-seed",
       applied,
@@ -203,14 +229,24 @@ export function generate(seedVersion = 1, { jobCount = 12 } = {}) {
   // the run panel + insights render a live-looking timeline.
   const activity = [];
   let runN = 0;
+  const pushRun = (job, routine, daysAgo) => {
+    const runId = `r-demo-${++runN}`;
+    const startTs = dayISO(daysAgo);
+    const doneTs = new Date(Date.parse(startTs) + 90000 + runN * 1000).toISOString();
+    activity.push({ ts: startTs, kind: "run", runId, routine, label: routine, jobId: job.id, batchId: null, status: "running" });
+    activity.push({ ts: doneTs, kind: "run", runId, routine, label: routine, jobId: job.id, batchId: null, status: "done", exitCode: 0 });
+  };
   for (const j of jobs) {
     if (!j.artifacts.length) continue;
-    const runId = `r-demo-${++runN}`;
-    const routine = j.status === "drafted" ? "first-draft-job" : "finalize-job";
-    const startTs = dayISO(15 - runN);
-    const doneTs = new Date(Date.parse(startTs) + 90000 + runN * 1000).toISOString();
-    activity.push({ ts: startTs, kind: "run", runId, routine, label: routine, jobId: j.id, batchId: null, status: "running" });
-    activity.push({ ts: doneTs, kind: "run", runId, routine, label: routine, jobId: j.id, batchId: null, status: "done", exitCode: 0 });
+    // Hero A treatment (spec 3.2): far-along jobs carry the FULL plausible run
+    // history (draft then finalize, days apart) so the drawer's activity log and
+    // the Insights view read as a system in daily use, not a single event.
+    if (["interview", "offer", "submitted"].includes(j.status)) {
+      pushRun(j, "first-draft-job", 18 - runN);
+      pushRun(j, "finalize-job", 12 - runN);
+    } else {
+      pushRun(j, j.status === "drafted" ? "first-draft-job" : "finalize-job", 15 - runN);
+    }
   }
 
   // A per-job chat transcript for the first artifact-bearing job.

@@ -41,6 +41,32 @@ describe("demo seed determinism", () => {
     const statuses = new Set(ds.jobs.map((j) => j.status));
     expect(statuses.size).toBeGreaterThan(2);
   });
+
+  it("matches the PM-spec funnel (rc4-demo-journey-spec 3.1): ~23 jobs, all 9 statuses, honest losses, every track twice", () => {
+    const ds = generate(1);
+    const byStatus = {};
+    for (const j of ds.jobs) byStatus[j.status] = (byStatus[j.status] || 0) + 1;
+    // The exact funnel shape is the product requirement (wide top, narrow bottom).
+    expect(byStatus).toEqual({ lead: 5, queued: 3, drafted: 2, ready: 2, submitted: 4, interview: 2, offer: 1, rejected: 2, closed: 2 });
+    // Every track badge/filter has at least 2 jobs (board + Insights look alive).
+    const byTrack = {};
+    for (const j of ds.jobs) byTrack[j.track] = (byTrack[j.track] || 0) + 1;
+    for (const [track, n] of Object.entries(byTrack)) expect(n, `track ${track}`).toBeGreaterThanOrEqual(2);
+    expect(Object.keys(byTrack).length).toBe(7);
+    // Lead/queued deadlines are far-future so the lazy auto-close sweep can never
+    // eat the top of the funnel (the demo must not degrade as days pass).
+    for (const j of ds.jobs.filter((x) => ["lead", "queued"].includes(x.status))) {
+      expect(j.deadline > "2098-12-31", `deadline ${j.deadline} on ${j.id}`).toBe(true);
+    }
+    // Hero A (an interview job) carries the complete artifact set + a multi-run history.
+    const heroA = ds.jobs.find((j) => j.status === "interview");
+    expect(heroA.artifacts.length).toBeGreaterThanOrEqual(2);
+    expect(heroA.notes.map((n) => n.name)).toContain("gaps.md");
+    expect(ds.activity.filter((a) => a.jobId === heroA.id).length).toBeGreaterThanOrEqual(4);
+    // Hero B: a queued job (Draft replay) and a drafted job (Finalize replay) both exist.
+    expect(ds.jobs.some((j) => j.status === "queued")).toBe(true);
+    expect(ds.jobs.some((j) => j.status === "drafted")).toBe(true);
+  });
 });
 
 describe("applySeed through the Store seam (FileStore)", () => {
