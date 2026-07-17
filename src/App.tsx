@@ -31,6 +31,7 @@ import { track } from "./lib/telemetry";
 import type { EntityRef } from "./lib/relatedEntities";
 import { openSscHub } from "./lib/sscHub";
 import { clearRoute, jobsHash, navigate, parseRoute, useRoute } from "./lib/router";
+import { setAuthStatus, useAuthStatus } from "./lib/authSession";
 import { shortcutBlockReason } from "./lib/shortcuts";
 import {
   addRun,
@@ -258,6 +259,20 @@ export default function App() {
   useEffect(() => {
     if (demoMode && view === "product") switchView("jobs");
   }, [demoMode, view, switchView]);
+
+  // App-auth session (SIM-391). authRequired comes from the LoginGate's status
+  // probe (lib/authSession) - true only on the walled private instance, so the
+  // Log out affordance never appears on the laptop or the demo. Logging out
+  // clears the cookie server-side, then flips the store: LoginGate unmounts
+  // this whole component (all data hooks torn down) and shows the gate. The
+  // flip happens even if the request failed - the gate re-probes on mount, so
+  // an already-dead session still lands somewhere honest.
+  const authStatus = useAuthStatus();
+  const logout = useCallback(() => {
+    api.logout()
+      .catch(() => {})
+      .finally(() => setAuthStatus({ authRequired: true, authenticated: false }));
+  }, []);
 
   async function runRoutine(routine: string, jobId?: string) {
     setRunNote(null);
@@ -488,6 +503,8 @@ export default function App() {
           parkedCount={tasksState.parkedCount}
           onReviewDecisions={openDecisions}
           demoMode={demoMode}
+          authRequired={!!authStatus?.authRequired}
+          onLogout={logout}
         />
       </ErrorBoundary>
 

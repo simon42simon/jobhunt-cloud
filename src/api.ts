@@ -30,8 +30,16 @@ import type {
   TelemetrySummary,
 } from "./types";
 
+import { notifyUnauthorized, type AuthStatus } from "./lib/authSession";
+
 async function json<T>(res: Response): Promise<T> {
   if (!res.ok) {
+    // Mid-session 401 = the session cookie expired or was cleared (SIM-391):
+    // flip the client back to the login gate instead of surfacing a dead-board
+    // error. Only the auth-walled instance can ever 401 (auth off mounts no
+    // gate), and the login route's own credential 401 does not pass through
+    // here (api.login returns the raw Response).
+    if (res.status === 401) notifyUnauthorized();
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || `${res.status} ${res.statusText}`);
   }
@@ -52,6 +60,33 @@ function attachmentNameHeader(name: string): string {
 }
 
 export const api = {
+  // ---- app auth (SIM-391; server/auth.js, ADR-024) --------------------------
+  // An auth-OFF server (laptop dev, the public demo) does not register the
+  // /api/auth/* routes at all, so this probe 404s there - the CALLER (LoginGate)
+  // maps any failure to { authRequired:false }, which renders exactly today's
+  // app. Explicit credentials:"same-origin" throughout: the httpOnly session
+  // cookie must ride every auth call.
+  getAuthStatus: () =>
+    fetch("/api/auth/status", { credentials: "same-origin" }).then((r) => json<AuthStatus>(r)),
+
+  // Returns the RAW Response (never json()): a 401 here is the server's
+  // credential verdict on this attempt, not an expired session, and must not
+  // trip the global back-to-gate hook. The gate reads res.status and maps it
+  // through one pure copy rule (lib/authSession loginErrorMessage) - the body's
+  // error detail is deliberately never shown.
+  login: (passphrase: string) =>
+    fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ passphrase }),
+    }),
+
+  logout: () =>
+    fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" }).then((r) =>
+      json<{ ok: boolean }>(r),
+    ),
+
   getConfig: () => fetch("/api/config").then((r) => json<AppConfig>(r)),
 
   getJobs: () => fetch("/api/jobs").then((r) => json<Job[]>(r)),

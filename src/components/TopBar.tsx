@@ -39,6 +39,8 @@ export function TopBar({
   parkedCount,
   onReviewDecisions,
   demoMode,
+  authRequired,
+  onLogout,
 }: {
   view: ViewMode;
   setView: (v: ViewMode) => void;
@@ -69,6 +71,12 @@ export function TopBar({
   // shortcut and bounces any product-view fallback). Optional: real mode omits
   // it and renders unchanged.
   demoMode?: boolean;
+  // App-auth session controls (SIM-391): the Log out affordance renders ONLY
+  // when the server says authRequired (the private walled instance) - the
+  // laptop/demo (auth off) get zero new chrome. Both optional so every
+  // existing call site renders unchanged.
+  authRequired?: boolean;
+  onLogout?: () => void;
 }) {
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -311,6 +319,19 @@ export function TopBar({
       <div className={view === "jobs" ? "shrink-0" : "ml-auto shrink-0"}>
         <NotificationBell onNavigate={setView} parkedCount={parkedCount} onReviewDecisions={onReviewDecisions} />
       </div>
+
+      {/* Session control for the auth-walled instance ONLY (SIM-391): quiet,
+          trailing the bell. Auth off renders nothing here. */}
+      {authRequired && (
+        <button
+          type="button"
+          onClick={onLogout}
+          className="flex min-h-[44px] shrink-0 items-center rounded-md border border-[var(--color-edge)] px-2.5 py-1.5 text-[12px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] sm:min-h-0"
+          title="End this session and return to the login gate"
+        >
+          Log out
+        </button>
+      )}
     </header>
   );
 }
