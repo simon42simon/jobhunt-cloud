@@ -82,9 +82,20 @@ export function jobsHash(jobId?: string): string {
 // Push-navigate to a hash. Assigning location.hash adds a history entry AND
 // fires hashchange, so browser Back returns to the previous hash for free
 // (detail -> board) and useRoute consumers re-render - no manual emit needed.
+//
+// SAME-HASH hardening (RC-4 QA BUG-1, the "zombie drawer"): assigning the hash
+// its CURRENT value fires NO hashchange, so it used to be a total no-op. If a
+// consumer's route state ever drifts from the URL (QA observed a drawer still
+// mounted on a bare "#/jobs" URL after a missed/suppressed hashchange), every
+// recovery path - the drawer's X, Escape, the backdrop click - re-navigates to
+// the SAME bare hash and silently did nothing; only a reload escaped. Emitting
+// manually on a same-value assignment makes every navigate self-healing: the
+// subscribers re-read the real URL and any drifted state snaps back to it.
 export function navigate(hash: string): void {
   if (typeof window === "undefined") return;
+  const before = window.location.hash;
   window.location.hash = hash;
+  if (window.location.hash === before) emit();
 }
 
 // Strip the hash WITHOUT adding a history entry (leaving the tasks surface

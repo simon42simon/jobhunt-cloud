@@ -234,4 +234,39 @@ describe("demo chrome wiring contracts", () => {
     expect(detail).toContain('"draft-action"');
     expect(detail).toContain('"finalize-action"');
   });
+
+  // --- RC-4 QA fixes (BUG-1/2/3 + the idle finding) --------------------------
+
+  it("BUG-1: a card-anchored advance PARKS until the stale drawer unmounts, and navigate() self-heals a same-hash no-op", () => {
+    // The tour side: advance() parks the target step (setPending) instead of
+    // rendering a beat under a still-mounted drawer, and the pending effect
+    // re-issues the close + force-advances so it can never hang.
+    expect(tour).toContain("setPending(to)");
+    expect(tour).toMatch(/window\.setTimeout\(onCloseDrawer, \d+\)/);
+    // The router side: assigning the CURRENT hash fires no hashchange, so
+    // navigate must emit manually - otherwise a drifted drawer's X/Escape/
+    // backdrop close are all silent no-ops (QA's zombie drawer).
+    const router = read("../src/lib/router.ts");
+    expect(router).toMatch(/if \(window\.location\.hash === before\) emit\(\);/);
+  });
+
+  it("BUG-2: anchors scroll into view deterministically (instant, centered), never a cancellable smooth scroll", () => {
+    expect(tour).toContain('el.scrollIntoView({ block: "nearest", inline: "center", behavior: "auto" })');
+    expect(tour).not.toContain('"smooth"');
+  });
+
+  it("BUG-3: the Product tab (a localhost-only hub handoff) never renders on the demo", () => {
+    const topbar = read("../src/components/TopBar.tsx");
+    expect(topbar).toMatch(/\{!demoMode && \(/);
+    // App: the p shortcut is inert and any sideways landing on the product
+    // view bounces back to Jobs in demo mode.
+    expect(app).toContain('if (!demoMode) switchView("product")');
+    expect(app).toMatch(/if \(demoMode && view === "product"\) switchView\("jobs"\)/);
+  });
+
+  it("idle finding: the tour layer is event-driven - no polling interval, no rAF loop", () => {
+    expect(tour).not.toContain("setInterval");
+    expect(tour).not.toContain("requestAnimationFrame");
+    expect(tour).toContain("MutationObserver");
+  });
 });

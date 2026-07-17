@@ -38,6 +38,7 @@ export function TopBar({
   batchFinalizeCount,
   parkedCount,
   onReviewDecisions,
+  demoMode,
 }: {
   view: ViewMode;
   setView: (v: ViewMode) => void;
@@ -62,6 +63,12 @@ export function TopBar({
   // threaded to the always-mounted notification bell (Decisions surface v2).
   parkedCount: number;
   onReviewDecisions: () => void;
+  // RC-4 QA BUG-3: the Product tab's whole content is a handoff link to the SSC
+  // Product Hub on localhost:5185 - on the PUBLIC demo that is a dead link and
+  // an internal-infra leak, so demo mode hides the tab (App also inerts the `p`
+  // shortcut and bounces any product-view fallback). Optional: real mode omits
+  // it and renders unchanged.
+  demoMode?: boolean;
 }) {
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -140,15 +147,19 @@ export function TopBar({
         >
           Insights
         </button>
-        <span className="mx-1 h-4 w-px bg-[var(--color-edge)]" />
-        <button
-          className={tabCls(view === "product")}
-          aria-pressed={view === "product"}
-          onClick={() => navTo("product")}
-          title="Roadmap, blueprint, changelog (p)"
-        >
-          Product
-        </button>
+        {!demoMode && (
+          <>
+            <span className="mx-1 h-4 w-px bg-[var(--color-edge)]" />
+            <button
+              className={tabCls(view === "product")}
+              aria-pressed={view === "product"}
+              onClick={() => navTo("product")}
+              title="Roadmap, blueprint, changelog (p)"
+            >
+              Product
+            </button>
+          </>
+        )}
       </div>
 
       {/* Discovery-cadence visibility (t-1783183576588): how many sources are

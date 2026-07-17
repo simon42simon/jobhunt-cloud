@@ -250,6 +250,15 @@ export default function App() {
     setTourReplays((n) => n + 1);
   }, [ensureBoardForTour]);
 
+  // QA BUG-3: the Product tab is hidden in demo mode (TopBar), but the view can
+  // still be reached sideways - the `p` shortcut (inerted below), a `#/tasks`
+  // deep link, ChatCapture's "view tasks". Whatever the path, a demo visitor
+  // landing on "product" bounces straight back to Jobs, so the localhost-only
+  // Product-Hub handoff panel can never render on the public demo.
+  useEffect(() => {
+    if (demoMode && view === "product") switchView("jobs");
+  }, [demoMode, view, switchView]);
+
   async function runRoutine(routine: string, jobId?: string) {
     setRunNote(null);
     try {
@@ -375,7 +384,9 @@ export default function App() {
         switchView("jobs");
         setJobsView("table");
       } else if (e.key === "p") {
-        switchView("product");
+        // Inert on the public demo (QA BUG-3) - the Product tab is hidden
+        // there, so its shortcut must not open the view either.
+        if (!demoMode) switchView("product");
       } else if (e.key === "d") {
         switchView("discovery");
       } else if (e.key === "i") {
@@ -384,7 +395,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [adding, selectedJob, closeJob, pendingMove, undo, runNote, runs, activeBatch, shortcutHelp, switchView]);
+  }, [adding, selectedJob, closeJob, pendingMove, undo, runNote, runs, activeBatch, shortcutHelp, switchView, demoMode]);
 
   // Auto-dismiss the undo toast after a few seconds.
   useEffect(() => {
@@ -476,6 +487,7 @@ export default function App() {
           batchFinalizeCount={finalizeReadyJobs.length}
           parkedCount={tasksState.parkedCount}
           onReviewDecisions={openDecisions}
+          demoMode={demoMode}
         />
       </ErrorBoundary>
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Job } from "../types";
 import {
   anchorSelector,
@@ -51,28 +51,39 @@ function sameRect(a: Rect | null, b: Rect | null): boolean {
   );
 }
 
-// Track the anchor element's viewport rect while a beat shows. A light poll +
-// capture-phase scroll/resize listeners rather than observers: the anchor can
-// appear LATE (the drawer opening after the invited click), move (board
-// scroll), or vanish (a filter) - one 200ms measure handles all three without
-// wiring into every scroller. State only changes when the rect actually moves.
+// Track the anchor element's viewport rect while a beat shows - fully
+// EVENT-DRIVEN (QA idle finding): a debounced MutationObserver catches the
+// anchor appearing/vanishing (the drawer mounting after the invited click, a
+// filter hiding a card), capture-phase scroll + resize catch it moving. No
+// polling interval and no rAF loop, so a quiet page actually reaches idle; the
+// ring's movement is animated by the .demo-spotlight CSS transition alone.
 function useAnchorRect(selector: string | null): Rect | null {
   const [rect, setRect] = useState<Rect | null>(null);
-  const scrolledFor = useRef<string | null>(null);
   useEffect(() => {
     if (!selector) {
       setRect(null);
       return;
     }
     let last: Rect | null = null;
+    let scrolledAt = 0; // last scrollIntoView for THIS selector (0 = not yet)
+    let timer = 0;
+    const offscreen = (r: DOMRect) =>
+      r.right < 0 || r.left > window.innerWidth || r.bottom < 0 || r.top > window.innerHeight;
     const measure = () => {
       const el = document.querySelector(selector);
-      if (el && scrolledFor.current !== selector) {
-        // Bring the anchor on screen ONCE per beat (the board scrolls
-        // horizontally; a hero card can start off-viewport). "nearest" so an
-        // already-visible anchor never jumps.
-        scrolledFor.current = selector;
-        el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+      if (el) {
+        // QA BUG-2: bring the anchor into view DETERMINISTICALLY - instantly
+        // (behavior:"auto"; a smooth scroll can be cancelled mid-flight and
+        // strand the anchor off-viewport), centered on the horizontal axis
+        // (the board scrolls sideways and a hero card can sit a full viewport
+        // off to either edge). Fires on first sight of the anchor, and AGAIN
+        // if a later layout/scroll pushed it fully off-viewport - so the
+        // callout can never narrate an invisible element.
+        const now = Date.now();
+        if (scrolledAt === 0 || (offscreen(el.getBoundingClientRect()) && now - scrolledAt > 600)) {
+          scrolledAt = now;
+          el.scrollIntoView({ block: "nearest", inline: "center", behavior: "auto" });
+        }
       }
       const r = el?.getBoundingClientRect() ?? null;
       const next = r ? { top: r.top, left: r.left, width: r.width, height: r.height } : null;
@@ -81,14 +92,26 @@ function useAnchorRect(selector: string | null): Rect | null {
         setRect(next);
       }
     };
+    // Trailing debounce: a mutation/scroll burst costs ONE layout read after it
+    // settles, and nothing at all runs while the page is quiet.
+    const schedule = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(measure, 80);
+    };
     measure();
-    const iv = window.setInterval(measure, 200);
-    window.addEventListener("scroll", measure, true);
-    window.addEventListener("resize", measure);
+    const mo = new MutationObserver(schedule);
+    mo.observe(document.body, { childList: true, subtree: true, attributes: true });
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
+    // Scroll events are rAF-timed - a hidden tab suppresses them - so re-measure
+    // when the tab comes back to the foreground and the ring snaps to truth.
+    document.addEventListener("visibilitychange", schedule);
     return () => {
-      window.clearInterval(iv);
-      window.removeEventListener("scroll", measure, true);
-      window.removeEventListener("resize", measure);
+      window.clearTimeout(timer);
+      mo.disconnect();
+      window.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
+      document.removeEventListener("visibilitychange", schedule);
     };
   }, [selector]);
   return rect;
@@ -142,11 +165,45 @@ export function DemoTour({
   onCloseDrawer: () => void;
 }) {
   const [step, setStep] = useState<TourStep | null>(() => (loadMemory() ? null : "choice"));
+  // A beat advance WAITING for a stale drawer to actually unmount (QA BUG-1):
+  // the target step is parked here instead of rendered immediately, so a
+  // card-anchored beat can never mis-anchor into (or under) a drawer that is
+  // still on its way out. Completed by the effect below.
+  const [pending, setPending] = useState<TourStep | null>(null);
   const heroes = useMemo(() => findHeroes(jobs), [jobs]);
 
   useEffect(() => {
-    if (replaySignal > 0) setStep("beat1");
+    if (replaySignal > 0) {
+      setPending(null);
+      setStep("beat1");
+    }
   }, [replaySignal]);
+
+  // Complete a parked advance once the drawer is GONE (or is the target hero's
+  // own). If the drawer refuses to die - QA's zombie: route state drifted from
+  // the URL, so the first close was a silent no-op - RE-ISSUE the close (
+  // navigate() is now self-healing on a same-hash assignment, lib/router) and
+  // after a short grace force the advance anyway, so the tour can never hang.
+  useEffect(() => {
+    if (!pending) return;
+    const target =
+      pending === "beat2" ? heroes.heroA?.id : pending === "beat3" ? heroes.heroB?.job.id : null;
+    if (!selectedJob || selectedJob === target) {
+      setStep(pending);
+      setPending(null);
+      return;
+    }
+    const retry = window.setTimeout(onCloseDrawer, 250);
+    const force = window.setTimeout(() => {
+      onCloseDrawer();
+      setStep(pending);
+      setPending(null);
+    }, 1200);
+    return () => {
+      window.clearTimeout(retry);
+      window.clearTimeout(force);
+    };
+  }, [pending, selectedJob, heroes, onCloseDrawer]);
 
   // Reaching the close panel IS completion (AC4's end state) - remember it
   // immediately so a reload from here never re-prompts the first-run choice.
@@ -165,21 +222,30 @@ export function DemoTour({
 
   function dismiss() {
     saveMemory("dismissed");
+    setPending(null);
     setStep(null);
   }
   function start() {
     onEnsureBoard();
+    setPending(null);
     setStep("beat1");
   }
   // Advance one beat. If the NEXT beat anchors a hero's board card while some
-  // OTHER job's drawer is still open (beat 2's Hero A, typically), close it -
+  // OTHER job's drawer is still open (beat 2's Hero A, typically), close it and
+  // PARK the advance until the drawer has actually unmounted (QA BUG-1) -
   // otherwise the invited click lands on the old drawer's backdrop instead of
   // the spotlighted card. Never closes a drawer already showing the target.
   function advance(from: "beat1" | "beat2" | "beat3") {
     const to = nextStep(from, heroes);
-    if (to === "beat2" && selectedJob && selectedJob !== heroes.heroA?.id) onCloseDrawer();
-    if (to === "beat3" && selectedJob && selectedJob !== heroes.heroB?.job.id) onCloseDrawer();
-    setStep(to);
+    const staleDrawer =
+      (to === "beat2" && !!selectedJob && selectedJob !== heroes.heroA?.id) ||
+      (to === "beat3" && !!selectedJob && selectedJob !== heroes.heroB?.job.id);
+    if (staleDrawer) {
+      onCloseDrawer();
+      setPending(to);
+    } else {
+      setStep(to);
+    }
   }
 
   if (step === "choice") {
