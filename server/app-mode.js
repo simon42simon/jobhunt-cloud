@@ -57,6 +57,15 @@ export function runnerEnabled(env = {}) {
   return resolveAppMode(env) === "real" && present(env.RUNNER_TOKEN_HASH);
 }
 
+// True only when the vault->cloud SYNC ingest surface may run: REAL mode AND the
+// verify-only SYNC_TOKEN_HASH is present (SIM-393 I1, mirroring runnerEnabled). The
+// cloud holds ONLY sha256(token) as SYNC_TOKEN_HASH; the reusable plaintext lives on
+// the laptop (~/.ssc-secrets). Demo can never satisfy this - it carries no sync
+// material and, per GC-3, the isolation gate refuses to boot if it can see any.
+export function syncEnabled(env = {}) {
+  return resolveAppMode(env) === "real" && present(env.SYNC_TOKEN_HASH);
+}
+
 // True only when Apify egress may run: REAL mode AND an APIFY token is present. In
 // demo mode this is always false (the token is also asserted-absent at boot). The
 // owner's own `apifyEnabled` config flag still gates it further in index.js; this
@@ -108,6 +117,12 @@ export function resolveRuntime(env = {}) {
     if (present(env.APIFY_TOKEN)) {
       throw isoErr("demo mode must not carry APIFY_TOKEN (the demo uses seed finds, never live Apify egress)");
     }
+    // GC-3 (SIM-393): the sync/export credentials join the "demo refuses to start if
+    // it can see anything real" clause. The route-level 501 stays as a backstop, but
+    // a demo that can even SEE the sync verify-hash must not boot.
+    if (present(env.SYNC_TOKEN) || present(env.SYNC_TOKEN_HASH)) {
+      throw isoErr("demo mode must not carry any sync material (SYNC_TOKEN / SYNC_TOKEN_HASH); the demo has no vault->cloud sync lane");
+    }
   }
 
   return {
@@ -115,6 +130,7 @@ export function resolveRuntime(env = {}) {
     demo,
     storeBackend,
     runnerEnabled: runnerEnabled(env),
+    syncEnabled: syncEnabled(env),
     apifyModeAllows: apifyModeAllows(env),
     resetSecret: demo ? demoResetSecret(env) : null,
   };

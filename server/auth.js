@@ -1,4 +1,4 @@
-// Feature-flagged app-level auth for the jobhunt file bridge (SIM-85 / RC-1).
+﻿// Feature-flagged app-level auth for the jobhunt file bridge (SIM-85 / RC-1).
 //
 // Design contract (see ADR-024 in docs/governance.md):
 //   - DEFAULT OFF. With no passphrase hash configured and JOBHUNT_AUTH unset,
@@ -235,8 +235,11 @@ export async function verifyPassphrase(hash, passphrase) {
 
 // ---- rate limiter for the login route -------------------------------------
 // Defaults: 10 attempts / 15 min per IP. Env-overridable so a test can drive the
-// 429 cheaply and an operator can retune without a code change.
-export function createLoginLimiter(env = process.env) {
+// 429 cheaply and an operator can retune without a code change. `onLimited`
+// (SIM-386) lets the failed-login monitor count attempts the limiter swallows -
+// a brute-forcer who has hit the cap is STILL a failed-login signal, so those
+// 429s must not go dark. The 429 body is unchanged (pinned by auth.test.js).
+export function createLoginLimiter(env = process.env, { onLimited = null } = {}) {
   const max = Number(env.JOBHUNT_AUTH_RATELIMIT_MAX) || 10;
   const windowMs = Number(env.JOBHUNT_AUTH_RATELIMIT_WINDOW_MS) || 15 * 60 * 1000;
   return rateLimit({
@@ -244,8 +247,172 @@ export function createLoginLimiter(env = process.env) {
     max,
     standardHeaders: true,
     legacyHeaders: false,
-    message: { error: "too many login attempts, try again later" },
+    handler: (req, res) => {
+      if (onLimited) {
+        try {
+          onLimited(req);
+        } catch {
+          /* visibility is telemetry - never let it break the 429 */
+        }
+      }
+      res.status(429).json({ error: "too many login attempts, try again later" });
+    },
   });
+}
+
+// ---- failed-login visibility (SIM-386, guardian RR-1) -----------------------
+// Every failed login attempt (bad passphrase AND rate-limited) is recorded three
+// ways, none of which ever carries credential material:
+//   1. stdout - one structured line per failure (the always-on Railway log stream).
+//   2. the durable activity log via store.appendActivity (kind:"auth" lines; the
+//      seam stamps ts and works identically on FileStore and PgStore).
+//   3. the notification bell - when failures cross the threshold inside one
+//      window the monitor appends ONE extra "login_failures_threshold" line,
+//      which index.js's feed derivation folds into a single login_failed
+//      notification per window (no notify-spam).
+// The event is built ONLY from the whitelisted fields below - never from
+// req.body - so the attempted passphrase can never leak into any record.
+
+export const FAILED_LOGIN_ALERT_THRESHOLD = 3; // failures per window before the bell fires
+export const FAILED_LOGIN_FEED_CAP = 50;
+// Guardian condition 1 (SIM-386 review, 2026-07-17): durable appendActivity
+// calls are BOUNDED per window. Without this, every post-rate-limit request
+// appended a permanent activity_log row - an unbounded, unauthenticated,
+// attacker-controlled write primitive into a never-deletes store on a public
+// domain. Cap = the login limiter's default max (10) + margin; beyond it the
+// in-memory rolling counter and the threshold latch keep counting EXACTLY
+// (the bell count stays true via the live snapshot overlay in index.js), but
+// nothing further is persisted for that window.
+export const FAILED_LOGIN_DURABLE_CAP = 20;
+// Beyond the durable cap, stdout keeps a SAMPLED heartbeat (every Nth failure,
+// with the true count in the line) instead of one line per request - the
+// platform log stream stays an always-on record without becoming a flood amp.
+export const FAILED_LOGIN_STDOUT_SAMPLE = 10;
+
+// Proxy-aware client IP. index.js sets Express `trust proxy` from the explicit
+// JOBHUNT_TRUST_PROXY opt-in (Railway sets it to 1 hop), so req.ip is already
+// the X-Forwarded-For CLIENT address behind the platform proxy and the raw
+// socket peer on plain loopback - the same trust decision the rate limiter
+// keys on. Never read X-Forwarded-For directly here: without the trust-proxy
+// opt-in that header is attacker-controlled.
+export function clientIp(req) {
+  const ip = (req && (req.ip || (req.socket && req.socket.remoteAddress))) || "";
+  return String(ip).slice(0, 64) || "unknown";
+}
+
+function userAgentOf(req) {
+  const ua = req && req.headers && req.headers["user-agent"];
+  return typeof ua === "string" ? ua.slice(0, 200) : "";
+}
+
+// Stateful per-process monitor. Window semantics: the FIRST failure opens a
+// window; failures accumulate until the window expires, then the next failure
+// opens a fresh one. The threshold line is appended exactly once per window
+// (the `alerted` latch), so the derived notification cannot spam. In-memory by
+// design - the durable per-failure lines live in the activity log regardless,
+// so a restart only resets the alert latch, never the record.
+//
+// Guardian condition 1: durable writes are CAPPED per window (durableCap; at
+// most durableCap login_failed lines + the one threshold line per window can
+// ever reach the store, no matter how many requests arrive). The rolling count
+// and the threshold latch are untouched by the cap - snapshot() exposes the
+// TRUE current-window count so the bell stays accurate beyond it.
+//
+// `surface` / `defaultReason` / `windowMs` options let OTHER token-auth lanes
+// (the SIM-393 sync surface) reuse this exact bounded pipeline instead of
+// growing their own unbounded one: their lines carry surface:"sync" and
+// reason:"bad_token" but flow through the same cap, latch, and feed.
+export function createFailedLoginMonitor({
+  store = null,
+  env = process.env,
+  now = Date.now,
+  log = console.warn,
+  surface = null,
+  defaultReason = "bad_passphrase",
+  windowMs: windowMsOverride = null,
+  durableCap = FAILED_LOGIN_DURABLE_CAP,
+} = {}) {
+  const threshold = Number(env.JOBHUNT_AUTH_ALERT_THRESHOLD) || FAILED_LOGIN_ALERT_THRESHOLD;
+  const windowMs = windowMsOverride || Number(env.JOBHUNT_AUTH_RATELIMIT_WINDOW_MS) || 15 * 60 * 1000;
+  let windowStartMs = -Infinity;
+  let count = 0;
+  let alerted = false;
+
+  function record(req, reason) {
+    const t = now();
+    if (t - windowStartMs >= windowMs) {
+      windowStartMs = t;
+      count = 0;
+      alerted = false;
+    }
+    count += 1;
+    const windowStart = new Date(windowStartMs).toISOString();
+    const durable = count <= durableCap; // guardian condition 1: bounded persistence
+    // Whitelisted fields ONLY - timestamp (seam-stamped), source, agent, counts.
+    // No req.body access anywhere in this function: no credential material.
+    const evt = {
+      kind: "auth",
+      event: "login_failed",
+      reason: reason === "rate_limited" ? "rate_limited" : defaultReason,
+      ...(surface ? { surface } : {}),
+      ip: clientIp(req),
+      userAgent: userAgentOf(req),
+      count,
+      windowStart,
+    };
+    if (store && durable) store.appendActivity(evt); // best-effort by contract; both backends
+    if (durable || count % FAILED_LOGIN_STDOUT_SAMPLE === 0) {
+      log(`[jobhunt] auth: FAILED LOGIN ${JSON.stringify({ ts: new Date(t).toISOString(), ...evt, durable })}`);
+    }
+    let thresholdCrossed = false;
+    if (!alerted && count >= threshold) {
+      alerted = true;
+      thresholdCrossed = true;
+      // Exactly once per window (the latch), so this line is bounded by construction.
+      const alert = {
+        kind: "auth",
+        event: "login_failures_threshold",
+        ...(surface ? { surface } : {}),
+        count,
+        threshold,
+        windowMs,
+        windowStart,
+      };
+      if (store) store.appendActivity(alert);
+      log(`[jobhunt] auth: FAILED-LOGIN THRESHOLD CROSSED ${JSON.stringify({ ts: new Date(t).toISOString(), ...alert })}`);
+    }
+    return { ...evt, thresholdCrossed, durable };
+  }
+
+  // The TRUE in-memory state of the current (or last-active) window - what the
+  // durable log cannot say beyond the cap. index.js overlays this onto the
+  // notification fold so the bell count stays exact during a flood.
+  function snapshot() {
+    if (count === 0) return null;
+    return { windowStart: new Date(windowStartMs).toISOString(), count, alerted };
+  }
+
+  return { record, snapshot, threshold, windowMs, durableCap };
+}
+
+// Pure read-side fold for GET /api/auth/failed-logins: the kind:"auth" lines out
+// of the raw activity-log text, newest-first, capped. Tolerant of torn lines
+// (same posture as every other activity-log consumer).
+export function parseFailedLogins(rawText, cap = FAILED_LOGIN_FEED_CAP) {
+  const out = [];
+  for (const line of String(rawText || "").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const r = JSON.parse(line);
+      if (r && r.kind === "auth" && (r.event === "login_failed" || r.event === "login_failures_threshold")) {
+        out.push(r);
+      }
+    } catch {
+      /* skip a torn line */
+    }
+  }
+  out.reverse(); // append-only log -> reverse = newest-first
+  return out.slice(0, cap);
 }
 
 // ---- routes + gate ---------------------------------------------------------
@@ -260,16 +427,41 @@ export function isAuthOpenPath(reqPath) {
 }
 
 // Register the login (rate-limited) / logout / status endpoints. Must be mounted
-// AFTER express.json (login reads a JSON body) and BEFORE the gate.
-export function installAuthRoutes(app, auth, env = process.env) {
-  const limiter = createLoginLimiter(env);
+// AFTER express.json (login reads a JSON body) and BEFORE the gate. `store`
+// (SIM-386) is the storage seam the failed-login monitor records through; when
+// absent the monitor still logs to stdout but persists nothing.
+export function installAuthRoutes(app, auth, env = process.env, { store = null } = {}) {
+  const monitor = createFailedLoginMonitor({ store, env });
+  const limiter = createLoginLimiter(env, {
+    onLimited: (req) => monitor.record(req, "rate_limited"),
+  });
 
   app.post("/api/auth/login", limiter, async (req, res) => {
     const ok = await verifyPassphrase(auth.hash, req.body && req.body.passphrase);
-    if (!ok) return res.status(401).json({ error: "invalid passphrase" });
+    if (!ok) {
+      monitor.record(req, "bad_passphrase");
+      return res.status(401).json({ error: "invalid passphrase" });
+    }
     const token = signSession(auth.secret, { exp: Date.now() + SESSION_TTL_MS });
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions(req));
     res.json({ ok: true });
+  });
+
+  // SIM-386: the authenticated read surface for failed-login events. Routes
+  // registered here run BEFORE the createAuthGate middleware (index.js mounts
+  // the gate after installAuthRoutes), so this endpoint must verify the session
+  // itself - it is deliberately NOT in isAuthOpenPath, and this inline check is
+  // the same verifySession the gate performs. With auth off the endpoint does
+  // not exist at all (installAuthRoutes is only called when auth.enabled).
+  app.get("/api/auth/failed-logins", (req, res) => {
+    const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+    if (!verifySession(auth.secret, token)) {
+      return res.status(401).json({ error: "authentication required" });
+    }
+    const events = parseFailedLogins(store ? store.readActivityText() : "");
+    // `live` = the true in-memory count for the current window (guardian
+    // condition 1: durable lines cap out, this never does). Null when quiet.
+    res.json({ events, threshold: monitor.threshold, windowMs: monitor.windowMs, live: monitor.snapshot() });
   });
 
   app.post("/api/auth/logout", (req, res) => {
@@ -287,6 +479,10 @@ export function installAuthRoutes(app, auth, env = process.env) {
     const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     res.json({ authRequired: true, authenticated: verifySession(auth.secret, token) });
   });
+
+  // Hand the monitor back so index.js can overlay its live snapshot onto the
+  // notification fold (guardian condition 1: bell accuracy beyond the cap).
+  return { monitor };
 }
 
 // Gate: 401 any /api/* request without a valid session, except the open auth

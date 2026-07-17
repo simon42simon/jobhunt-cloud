@@ -48,8 +48,13 @@ import {
   localDateISO,
   ensureArrays,
 } from "./lib.js";
-import { isDatedCopy, currentFiles, isPrepDoc, LEDGER_ARRAYS, normalizeRequest } from "./store-helpers.js";
+import { isDatedCopy, currentFiles, isPrepDoc, jobFileKind, LEDGER_ARRAYS, normalizeRequest } from "./store-helpers.js";
 import { mintNonce, constantTimeEqualHex, RUNNER_LEASE_MS, RUNNER_MAX_ATTEMPTS } from "./runner-lib.js";
+// SIM-393 I1 - the vault->cloud sync ingest seam (shared with FileStore; guardian
+// GC-1's ONE name validator + sync-lib's content hashing / migrate-data-parity
+// front validation), so the two backends can never drift on sync semantics.
+import { assertSafeName } from "./name-safety.js";
+import { sha256Hex, rowShaOf, validateJobFront } from "./sync-lib.js";
 
 // WRITABLE_FIELDS -> jobs column. Keys are the ONLY frontmatter fields the surgical
 // patch may touch (mirrors updateFrontmatter's gate); column names are constants.
@@ -388,12 +393,18 @@ export class PgStore {
   // (frontmatter scalar quoting reuses lib.yamlScalar, shared with FileStore.)
 
   _upsertJobFile(jobId, name, mime, kind, buf) {
+    // SIM-393 I1: every job_files write populates sha256 so the sync manifest never
+    // re-hashes blobs per call (design B2). This is the runner/upsert path (overwrite
+    // on name collision) - NOT the sync surface, which is insert-only via
+    // addJobFileIfAbsent below.
+    const b = Buffer.isBuffer(buf) ? buf : Buffer.from(buf);
     this.pg.query(
-      `insert into job_files (job_id, name, mime, kind, bytes, updated_at)
-       values ($1,$2,$3,$4,$5, now())
+      `insert into job_files (job_id, name, mime, kind, bytes, sha256, updated_at)
+       values ($1,$2,$3,$4,$5,$6, now())
        on conflict (job_id, name) do update
-         set mime=excluded.mime, kind=excluded.kind, bytes=excluded.bytes, updated_at=now()`,
-      [jobId, name, mime, kind, buf],
+         set mime=excluded.mime, kind=excluded.kind, bytes=excluded.bytes,
+             sha256=excluded.sha256, updated_at=now()`,
+      [jobId, name, mime, kind, b, sha256Hex(b)],
     );
   }
 
@@ -440,6 +451,105 @@ export class PgStore {
   // no route calls this in the storage parcel. No-op keeps the never-delete
   // contract trivially (it never removes anything).
   backupRoutineOutputs() {}
+
+  // ======================================================================
+  // VAULT -> CLOUD SYNC INGEST (SIM-393 I1) - INSERT-ONLY, never overwrites
+  // ======================================================================
+  // The SAME observable contract FileStore.{syncManifest,createJobIfAbsent,
+  // addJobFileIfAbsent} implement (the store-contract differential proves parity).
+  // Insert-only BY CONSTRUCTION: `on conflict do nothing` + a row-count check, and
+  // NO update/delete of an existing row/byte anywhere on this surface. The
+  // poison-the-CV overwrite attack is structurally impossible (guardian W2).
+
+  // Metadata + hashes only (design B2). rowSha from the stored raw_frontmatter +
+  // body; per-file sha256 read straight from the column the migration backfilled
+  // (and every write path now populates), so the manifest never re-hashes bytes.
+  syncManifest() {
+    const jobRows = this._all("select id, body, raw_frontmatter from jobs order by id", []);
+    const jobs = jobRows.map((r) => ({ id: r.id, rowSha: rowShaOf(r.raw_frontmatter || {}, r.body || "") }));
+    const fileRows = this._all(
+      "select job_id, name, sha256, octet_length(bytes) as bytes_len from job_files order by job_id, name",
+      [],
+    );
+    const files = fileRows.map((r) => ({
+      jobId: r.job_id,
+      name: r.name,
+      sha256: r.sha256,
+      bytesLen: Number(r.bytes_len),
+    }));
+    return { jobs, files };
+  }
+
+  // INSERT a jobs row from the vault's raw front + body (raw fidelity, EXACTLY as
+  // migrate-data's importDataset), insert-only via `on conflict (id) do nothing`.
+  // Returns { created:true, id } or { created:false, conflict:"job-exists" }.
+  createJobIfAbsent({ id, role, employer, front, body = "", tags = [], mtimeIso = null }) {
+    assertSafeName(id, "job id");
+    const v = validateJobFront({ role, employer, front, tags });
+    const d = v.front;
+    const str = (x) => (x ? x : null); // STRING_COLS
+    const scalar = (x) => (x == null || x === "" ? null : String(x)); // SCALAR_COLS
+    const updatedAt = mtimeIso ? new Date(mtimeIso).toISOString() : new Date().toISOString();
+    const r = this.pg.query(
+      `insert into jobs
+         (id, role, employer, type, status, fit, track, sector, tailoring, deadline, applied,
+          next_action, next_action_date, link, source, tags, body, raw_frontmatter, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19)
+       on conflict (id) do nothing`,
+      [
+        id,
+        role,
+        employer,
+        str(d.type),
+        str(d.status),
+        str(d.fit),
+        str(d.track),
+        str(d.sector),
+        str(d.tailoring),
+        scalar(d.deadline),
+        scalar(d.applied),
+        str(d.next_action),
+        scalar(d.next_action_date),
+        str(d.link),
+        scalar(d.source),
+        v.tags,
+        body == null ? "" : String(body),
+        J(d),
+        updatedAt,
+      ],
+    );
+    if (r.rowCount === 1) return { created: true, id };
+    return { created: false, conflict: "job-exists" };
+  }
+
+  // INSERT a companion file under an existing job, additively (design B3):
+  //   unknown job -> {result:"job-not-found"}; absent -> insert; same sha -> noop;
+  //   different bytes -> {result:"bytes-differ", cloudSha} (SKIP, cloud untouched).
+  addJobFileIfAbsent(jobId, name, { mime = null, mtimeIso = null, bytes } = {}) {
+    if (!this._one("select id from jobs where id=$1", [jobId])) return { result: "job-not-found" };
+    assertSafeName(name, "file name");
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || "");
+    const sha = sha256Hex(buf);
+    const existing = this._one("select sha256 from job_files where job_id=$1 and name=$2", [jobId, name]);
+    if (existing) {
+      if (existing.sha256 === sha) return { result: "noop", sha256: sha };
+      return { result: "bytes-differ", sha256: sha, cloudSha: existing.sha256 };
+    }
+    const kind = jobFileKind(name);
+    const updatedAt = mtimeIso ? new Date(mtimeIso).toISOString() : new Date().toISOString();
+    const r = this.pg.query(
+      `insert into job_files (job_id, name, mime, kind, bytes, sha256, updated_at)
+       values ($1,$2,$3,$4,$5,$6,$7)
+       on conflict (job_id, name) do nothing`,
+      [jobId, name, mime, kind, buf, sha, updatedAt],
+    );
+    if (r.rowCount === 1) return { result: "inserted", sha256: sha, kind, mime: mime || null };
+    // A concurrent insert won the race: re-read and report against the winner,
+    // never overwrite (insert-only degrades to noop/conflict, never clobber).
+    const now = this._one("select sha256 from job_files where job_id=$1 and name=$2", [jobId, name]);
+    if (now && now.sha256 === sha) return { result: "noop", sha256: sha };
+    return { result: "bytes-differ", sha256: sha, cloudSha: now ? now.sha256 : null };
+  }
 
   // ======================================================================
   // TASK BOARD

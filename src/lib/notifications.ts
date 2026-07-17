@@ -21,6 +21,7 @@ export const NOTIFICATION_TYPES: NotificationType[] = [
   "task_added",
   "task_done",
   "project_added",
+  "login_failed",
 ];
 
 // Per-type label (used by the event row and the settings toggles) plus whether
@@ -38,6 +39,9 @@ export const NOTIFICATION_META: Record<
   task_added: { label: "Task added", timed: false, colorKey: "todo" },
   task_done: { label: "Task done", timed: false, colorKey: "done" },
   project_added: { label: "Project added", timed: false, colorKey: "planned" },
+  // SIM-386: security signal - carries a real activity-log ts (timed) and always
+  // tints as attention (blocked/rose), never a success hue.
+  login_failed: { label: "Failed logins", timed: true, colorKey: "blocked" },
 };
 
 export function isTimedNotification(type: NotificationType): boolean {
@@ -115,6 +119,7 @@ export const DEFAULT_NOTIFICATION_PREFS: NotificationPrefs = {
   task_added: true,
   task_done: true,
   project_added: true,
+  login_failed: true,
 };
 
 // Merge an untrusted parsed blob (from localStorage) over the defaults, taking

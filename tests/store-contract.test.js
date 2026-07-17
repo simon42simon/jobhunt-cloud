@@ -368,6 +368,139 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
       expect(store.openJobFile(id, "nope.pdf")).toEqual({ ok: false, status: 404, error: "file not found" });
     });
   });
+
+  // ---- vault->cloud sync ingest: INSERT-ONLY on BOTH backends (SIM-393 I1) ----
+  // The differential: FileStore and PgStore implement the IDENTICAL observable
+  // insert-only contract (this spec runs against both), so the two can never drift.
+  describe("sync ingest (createJobIfAbsent / addJobFileIfAbsent / syncManifest)", () => {
+    const front = () => ({ type: "job", role: "Analyst", employer: "OCI", status: "queued", tags: ["job"], deadline: "2026-08-01" });
+    const seedJob = () =>
+      store.createJobIfAbsent({ id: "Analyst - OCI", role: "Analyst", employer: "OCI", front: front(), body: "# Analyst - OCI\n\nbody text", tags: ["job"] });
+
+    it("syncManifest is empty on a fresh store", () => {
+      expect(store.syncManifest()).toEqual({ jobs: [], files: [] });
+    });
+
+    it("createJobIfAbsent inserts a job (raw fidelity) readable via getJobSummary", () => {
+      const r = seedJob();
+      expect(r).toEqual({ created: true, id: "Analyst - OCI" });
+      const rec = store.getJobSummary("Analyst - OCI");
+      expect(rec.role).toBe("Analyst");
+      expect(rec.employer).toBe("OCI");
+      expect(rec.status).toBe("queued");
+      const m = store.syncManifest();
+      expect(m.jobs).toHaveLength(1);
+      expect(m.jobs[0].id).toBe("Analyst - OCI");
+      expect(m.jobs[0].rowSha).toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it("a second createJobIfAbsent for the same id is a reported conflict, NEVER an overwrite", () => {
+      seedJob();
+      const before = store.syncManifest().jobs[0].rowSha;
+      const r = store.createJobIfAbsent({ id: "Analyst - OCI", role: "Analyst", employer: "OCI", front: front(), body: "TAMPERED BODY", tags: ["job"] });
+      expect(r).toEqual({ created: false, conflict: "job-exists" });
+      expect(store.syncManifest().jobs[0].rowSha).toBe(before); // unchanged
+    });
+
+    it("createJobIfAbsent rejects an unsafe id (400) and an invalid front (400)", () => {
+      expect(() => store.createJobIfAbsent({ id: "../escape", role: "A", employer: "B", front: {} })).toThrow();
+      try {
+        store.createJobIfAbsent({ id: "../escape", role: "A", employer: "B", front: {} });
+      } catch (e) {
+        expect(e.httpStatus).toBe(400);
+      }
+      expect(() => store.createJobIfAbsent({ id: "Bad - Job", role: 123, employer: "B", front: {} })).toThrow();
+    });
+
+    it("addJobFileIfAbsent: insert -> manifest reflects sha256 + bytesLen; identical bytes -> noop", () => {
+      seedJob();
+      const bytes = Buffer.from("%PDF-1.4 tailored cv bytes");
+      const ins = store.addJobFileIfAbsent("Analyst - OCI", "CV - Analyst.pdf", { mime: "application/pdf", bytes });
+      expect(ins.result).toBe("inserted");
+      expect(ins.sha256).toMatch(/^[0-9a-f]{64}$/);
+      const m = store.syncManifest();
+      const f = m.files.find((x) => x.name === "CV - Analyst.pdf");
+      expect(f).toBeTruthy();
+      expect(f.sha256).toBe(ins.sha256);
+      expect(f.bytesLen).toBe(bytes.length);
+      const noop = store.addJobFileIfAbsent("Analyst - OCI", "CV - Analyst.pdf", { bytes });
+      expect(noop.result).toBe("noop");
+      expect(noop.sha256).toBe(ins.sha256);
+    });
+
+    it("addJobFileIfAbsent: same path + DIFFERENT bytes = bytes-differ, cloud copy untouched", () => {
+      seedJob();
+      const original = Buffer.from("original cv");
+      const ins = store.addJobFileIfAbsent("Analyst - OCI", "CV - Analyst.pdf", { mime: "application/pdf", bytes: original });
+      const conflict = store.addJobFileIfAbsent("Analyst - OCI", "CV - Analyst.pdf", { bytes: Buffer.from("POISONED cv") });
+      expect(conflict.result).toBe("bytes-differ");
+      expect(conflict.cloudSha).toBe(ins.sha256);
+      // the stored bytes are STILL the original - nothing was overwritten
+      const r = store.openJobFile("Analyst - OCI", "CV - Analyst.pdf");
+      expect(r.ok).toBe(true);
+      const chunks = [];
+      r.stream.on("data", (c) => chunks.push(c));
+      return new Promise((resolve) => {
+        r.stream.on("end", () => {
+          expect(Buffer.concat(chunks).equals(original)).toBe(true);
+          resolve();
+        });
+      });
+    });
+
+    it("addJobFileIfAbsent: unknown job -> job-not-found; hostile name -> 400", () => {
+      expect(store.addJobFileIfAbsent("Nope - Nowhere", "x.md", { bytes: Buffer.from("x") })).toEqual({ result: "job-not-found" });
+      seedJob();
+      try {
+        store.addJobFileIfAbsent("Analyst - OCI", "../../etc/passwd", { bytes: Buffer.from("x") });
+        throw new Error("should have thrown");
+      } catch (e) {
+        expect(e.httpStatus).toBe(400);
+      }
+    });
+  });
+});
+
+// ---- cross-backend rowSha parity (SIM-393 I1) --------------------------------
+// The manifest's rowSha MUST be identical across FileStore and PgStore for the SAME
+// seeded job, or the sync client's drift detection would false-positive after a
+// backend swap. Seeds one job into a fresh FileStore and (when the ephemeral PG is
+// available) a fresh PgStore, and asserts equal rowSha + equal file sha256. Skips
+// the PG half cleanly when the cluster can't start.
+describe("sync manifest rowSha/sha256 parity across backends", () => {
+  const jobFront = { type: "job", role: "Analyst", employer: "OCI", status: "queued", tags: ["job"], deadline: "2026-08-01" };
+  const seed = (s) => {
+    s.createJobIfAbsent({ id: "Analyst - OCI", role: "Analyst", employer: "OCI", front: jobFront, body: "# Analyst - OCI\n\nbody text", tags: ["job"] });
+    s.addJobFileIfAbsent("Analyst - OCI", "CV - Analyst.pdf", { mime: "application/pdf", bytes: Buffer.from("cv bytes here") });
+  };
+
+  it("FileStore and PgStore produce the identical manifest for the same seed", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "sync-parity-file-"));
+    const jobsDir = path.join(root, "Jobs");
+    const docsDir = path.join(root, "docs");
+    const dataDir = path.join(root, "data");
+    for (const d of [jobsDir, docsDir, dataDir]) fs.mkdirSync(d, { recursive: true });
+    const fileStore = resolveStore({}, { jobsDir, docsDir, dataDir, deps: DEPS });
+    fileStore.init();
+    seed(fileStore);
+    const fileManifest = fileStore.syncManifest();
+    fs.rmSync(root, { recursive: true, force: true });
+
+    expect(fileManifest.jobs).toHaveLength(1);
+    expect(fileManifest.files).toHaveLength(1);
+
+    if (!pgBackend.available) {
+      // eslint-disable-next-line no-console
+      console.warn(`[sync-parity] PgStore half SKIPPED: ${pgBackend.reason}`);
+      return;
+    }
+    pgBackend.store.truncateAllForTests();
+    seed(pgBackend.store);
+    const pgManifest = pgBackend.store.syncManifest();
+    expect(pgManifest.jobs[0].rowSha).toBe(fileManifest.jobs[0].rowSha);
+    expect(pgManifest.files[0].sha256).toBe(fileManifest.files[0].sha256);
+    expect(pgManifest.files[0].bytesLen).toBe(fileManifest.files[0].bytesLen);
+  });
 });
 
 // ---- FileStore-specific: the frontmatter BYTE-CONTRACT -----------------------

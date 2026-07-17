@@ -56,6 +56,24 @@ export function isPrepDoc(name) {
   return n.includes("interview") || n.includes("prep") || n.includes("star");
 }
 
+// Derive the job_files `kind` for a companion file from its name, mirroring what
+// the stores' OWN write paths set (SIM-393 I1; identical to migrate-data.mjs's
+// jobFileKind so a synced file's kind matches a migrated one). Note kinds first (a
+// current .md named gaps/job-description/feedback), then the cv/cover/other
+// artifact derivation. Shared by FileStore.addJobFileIfAbsent and
+// PgStore.addJobFileIfAbsent so the two backends can never drift on kind.
+export function jobFileKind(name) {
+  const lower = String(name || "").toLowerCase();
+  if (lower.endsWith(".md") && !isDatedCopy(name)) {
+    if (lower.includes("gaps")) return "gaps";
+    if (lower.includes("job-description")) return "job-description";
+    if (lower.includes("feedback")) return "feedback";
+  }
+  if (lower.includes("cv")) return "cv";
+  if (lower.includes("cover")) return "cover";
+  return "other";
+}
+
 // The read-only ledger vocabularies each YAML doc normalizes to (ensureArrays).
 export const LEDGER_ARRAYS = {
   "roadmap.yaml": ["phases"],

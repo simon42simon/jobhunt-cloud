@@ -842,7 +842,8 @@ export type NotificationType =
   | "wave_done"
   | "task_added"
   | "task_done"
-  | "project_added";
+  | "project_added"
+  | "login_failed";
 
 export interface NotificationRunRef {
   kind: "run";
@@ -874,11 +875,20 @@ export interface NotificationProjectRef {
   id: string;
 }
 
+// SIM-386 failed-login visibility: one event per alert window (the server's
+// threshold fold guarantees no per-failure spam); `count` is the window's
+// failure count. Carries a REAL activity-log timestamp, so it is timed.
+export interface NotificationAuthRef {
+  kind: "auth";
+  count: number;
+}
+
 export type NotificationRef =
   | NotificationRunRef
   | NotificationBatchRef
   | NotificationTaskRef
-  | NotificationProjectRef;
+  | NotificationProjectRef
+  | NotificationAuthRef;
 
 export interface Notification {
   id: string;

@@ -47,9 +47,16 @@ import {
   currentFiles,
   localDateStamp,
   isPrepDoc,
+  jobFileKind,
   LEDGER_ARRAYS,
   normalizeRequest,
 } from "./store-helpers.js";
+// SIM-393 I1 - the vault->cloud sync ingest seam. name-safety is the ONE shared
+// filename/path validator (guardian GC-1); sync-lib owns the JOBS-domain content
+// hashing + the migrate-data-parity frontmatter validation. BOTH backends import
+// these so FileStore and PgStore can never drift on sync semantics.
+import { assertSafeName, resolveInside } from "./name-safety.js";
+import { sha256Hex, rowShaOf, validateJobFront } from "./sync-lib.js";
 // Hybrid-runner queue policy + primitives (RC-3 / SIM-87 I7), shared with PgStore
 // so the two backends can never drift on lease/attempts/nonce semantics.
 import {
@@ -523,6 +530,101 @@ export class FileStore {
     const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
     writeFileAtomic(target, buf);
     return { name: base, mime: mime || null, bytes: buf.length };
+  }
+
+  // ======================================================================
+  // VAULT -> CLOUD SYNC INGEST (SIM-393 I1) - INSERT-ONLY, never overwrites
+  // ======================================================================
+  // The sync surface carries vault-born job data UP additively (design section 3):
+  // new job folder = insert; new companion file = insert; same path+sha = no-op;
+  // same path+different bytes = SKIP + loud conflict (cloud copy untouched). There
+  // is NO update/delete path here by construction. FileStore is the LAPTOP backend;
+  // it implements the SAME observable contract as PgStore so the store-contract
+  // differential proves the two never diverge.
+
+  // A read-only manifest of every job's rowSha + every companion file's sha256 +
+  // byte length. Metadata + hashes only, never file bytes (design B2). The job's
+  // OWN <Role>.md is excluded from `files` for parity with PgStore's job_files
+  // (which never holds the job row's markdown). Tolerant: an unreadable vault -> {}.
+  syncManifest() {
+    const jobs = [];
+    const files = [];
+    let folders;
+    try {
+      folders = fs
+        .readdirSync(this.jobsDir, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name);
+    } catch {
+      return { jobs, files };
+    }
+    for (const folder of folders) {
+      const folderPath = path.join(this.jobsDir, folder);
+      const jobFile = this._findJobFile(folderPath);
+      if (!jobFile) continue;
+      jobs.push({ id: folder, rowSha: rowShaOf(jobFile.data, jobFile.body) });
+      for (const f of this._listFolderFiles(folderPath)) {
+        if (f.name === jobFile.name) continue; // exclude the SoT job file
+        let buf;
+        try {
+          buf = fs.readFileSync(path.join(folderPath, f.name));
+        } catch {
+          continue;
+        }
+        files.push({ jobId: folder, name: f.name, sha256: sha256Hex(buf), bytesLen: buf.length });
+      }
+    }
+    return { jobs, files };
+  }
+
+  // INSERT a new job folder + its <Role>.md, EXACTLY from the vault's raw front +
+  // body (raw fidelity, not a template - the design forbids reusing createJob's
+  // template here). Insert-only: an existing folder id is a reported conflict, never
+  // an overwrite. Returns { created:true, id } or { created:false, conflict:"job-exists" }.
+  // Throws httpStatus-400 on an unsafe id or an invalid front (migrate-data parity).
+  createJobIfAbsent({ id, role, employer, front, body = "", tags = [], mtimeIso = null }) {
+    assertSafeName(id, "job id");
+    const v = validateJobFront({ role, employer, front, tags });
+    const folderPath = resolveInside(this.jobsDir, id);
+    if (fs.existsSync(folderPath)) return { created: false, conflict: "job-exists" };
+    // Faithful reconstruction: `---\n<yaml.dump(front)>---\n<body>` round-trips
+    // through parseFront byte-exact (verified), so the re-read front === v.front and
+    // the re-read body === body, keeping rowSha identical to PgStore's for the same
+    // seed. The front is persisted VERBATIM (includes type/tags/legacy keys).
+    const fileName = `${sanitizeForPath(role)}.md`;
+    const target = resolveInside(folderPath, fileName);
+    const fileText = "---\n" + yaml.dump(v.front) + "---\n" + (body == null ? "" : String(body));
+    fs.mkdirSync(folderPath, { recursive: true });
+    writeFileAtomic(target, fileText);
+    return { created: true, id };
+  }
+
+  // INSERT a companion file under an existing job, additively. Never overwrites:
+  //   - unknown job            -> { result:"job-not-found" }
+  //   - (job,name) absent      -> write, { result:"inserted", sha256 }
+  //   - (job,name) same bytes  -> { result:"noop", sha256 }        (idempotent)
+  //   - (job,name) diff bytes  -> { result:"bytes-differ", sha256, cloudSha }  (SKIP)
+  // Throws httpStatus-400 on an unsafe name. The name is contained inside the job
+  // folder via the shared resolveInside, so a traversal name can never escape.
+  addJobFileIfAbsent(jobId, name, { mime = null, mtimeIso = null, bytes } = {}) {
+    const folderPath = this.jobFolderPath(jobId); // contained + existence-checked
+    if (!folderPath) return { result: "job-not-found" };
+    assertSafeName(name, "file name");
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || "");
+    const sha = sha256Hex(buf);
+    const target = resolveInside(folderPath, name);
+    if (fs.existsSync(target)) {
+      let existingSha;
+      try {
+        existingSha = sha256Hex(fs.readFileSync(target));
+      } catch {
+        existingSha = null;
+      }
+      if (existingSha && existingSha === sha) return { result: "noop", sha256: sha };
+      return { result: "bytes-differ", sha256: sha, cloudSha: existingSha };
+    }
+    writeFileAtomic(target, buf);
+    return { result: "inserted", sha256: sha, kind: jobFileKind(name), mime: mime || null };
   }
 
   // ======================================================================

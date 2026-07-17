@@ -52,6 +52,7 @@ import {
   resolveAuth,
   installAuthRoutes,
   createAuthGate,
+  createFailedLoginMonitor,
   parseCorsOrigins,
   buildHelmetOptions,
   isBehindTls,
@@ -76,6 +77,10 @@ import {
   constantTimeEqualHex,
   RUNNER_ARTIFACT_MAX_BYTES,
 } from "./runner-lib.js";
+// SIM-393 I1 - vault->cloud sync ingest surface. The ONE shared name validator
+// (guardian GC-1) + the sync content helpers, reused by the /api/sync/* routes.
+import { isSafeName } from "./name-safety.js";
+import { sha256Hex } from "./sync-lib.js";
 import { loadTranscriptLines } from "../demo/replay.mjs";
 import { generate as generateDemoSeed, applySeed as applyDemoSeed } from "../demo/seed.mjs";
 
@@ -353,8 +358,16 @@ if (corsOrigins.length) {
 // Explicit JSON body-size cap (states the express.json 100kb default outright).
 // The image-upload route sets its own multipart cap (ATTACHMENT_MAX_BYTES).
 app.use(express.json({ limit: "100kb" }));
+// SIM-386 guardian condition 1: every failed-auth monitor registers here so the
+// notification fold can overlay its LIVE in-memory window count - durable lines
+// cap out per window (FAILED_LOGIN_DURABLE_CAP), the true count never does.
+const liveAuthMonitors = [];
 if (auth.enabled) {
-  installAuthRoutes(app, auth); // POST /api/auth/login (rate-limited) / logout, GET status
+  // POST /api/auth/login (rate-limited) / logout, GET status, GET failed-logins.
+  // The store rides along (SIM-386) so the failed-login monitor records through
+  // the storage seam - durable on FileStore and PgStore alike.
+  const { monitor } = installAuthRoutes(app, auth, process.env, { store });
+  liveAuthMonitors.push(monitor);
 }
 // The hybrid-runner endpoints (RC-3 / SIM-87 I7) carry their OWN bearer-token auth
 // (RUNNER_TOKEN_HASH) and MUST be registered BEFORE the cookie gate, so a tokened
@@ -362,6 +375,21 @@ if (auth.enabled) {
 // (including the owner enqueue route) stays behind the gate. Registered
 // unconditionally; the endpoints self-gate on runtime.runnerEnabled + demo (501).
 mountRunnerRoutes();
+// The vault->cloud SYNC ingest surface (SIM-393 I1) carries its OWN least-privilege
+// bearer-token auth (SYNC_TOKEN_HASH, separate from the runner token) and, like the
+// runner routes, MUST be registered BEFORE the cookie gate so a tokened laptop sync
+// client is not blocked by the missing session cookie. Every /api/sync/* route 401s
+// anonymously, 501s in demo / when not configured, and is insert-only by
+// construction. Registered unconditionally; the routes self-gate via syncAuth.
+// These consts are read at ROUTE-REGISTRATION time (express.raw cap) and at request
+// time (the failure window), so they are declared before the mount call to avoid a
+// temporal-dead-zone read.
+const SYNC_FILE_MAX_BYTES =
+  Number(process.env.SYNC_FILE_MAX_BYTES) > 0 ? Math.floor(Number(process.env.SYNC_FILE_MAX_BYTES)) : 15 * 1024 * 1024; // guardian-ratified 15 MB real-instance ceiling
+const SYNC_AUTH_MAX_FAILURES = 20; // per IP per window before a 429 (mirrors the runner lane)
+const SYNC_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
+const syncAuthFailures = new Map(); // ip -> { count, resetAt }
+mountSyncRoutes();
 if (auth.enabled) {
   app.use(createAuthGate(auth)); // 401 on any other /api/* without a valid session cookie
 }
@@ -534,6 +562,176 @@ function mountRunnerRoutes() {
     if (!r.ok) return res.status(403).json({ error: r.reason });
     if (r.jobId) broadcast({ type: "jobs-changed" }); // cloud has no watcher; nudge the UI
     res.json({ ok: true, idempotent: !!r.idempotent });
+  });
+}
+
+// ---- vault -> cloud sync ingest (SIM-393 I1, design section B) --------------
+// A separate, least-privilege bearer-token lane (SYNC_TOKEN, verify-only
+// SYNC_TOKEN_HASH cloud-side) whose blast radius is "insert jobs/files" - NOT the
+// runner token's "claimed-job lifecycle". Keeping them separate means neither
+// theft grants the other's powers and either rotates alone. Same mechanics as the
+// runner lane: constant-time verify (reused verifyRunnerToken), per-IP failure
+// rate-limit, 401 anonymous, 501 in demo / when not configured. Insert-only by
+// construction: no route here contains UPDATE or DELETE on user data.
+// (SYNC_FILE_MAX_BYTES + the failure-window constants are declared ABOVE the
+// mountSyncRoutes() call, since express.raw reads the cap at registration time.)
+
+// GC-2(c)-partial: a FAILED sync-token auth feeds the SIM-386 failed-auth
+// visibility - now through the SAME bounded monitor pipeline as the login
+// surface (guardian condition 1). The sync 429 branch fires recordSyncAuthFailure
+// on EVERY post-cap request, so the previous direct store.appendActivity here was
+// the same unbounded, unauthenticated durable-write primitive the guardian
+// flagged on the login limiter: the shared FAILED_LOGIN_DURABLE_CAP now bounds
+// it (at most cap login_failed lines + 1 threshold line per window, GLOBAL - an
+// IP-rotating attacker cannot multiply it), the in-memory count stays exact, and
+// stdout is sampled beyond the cap. Lines keep surface:"sync" + reason:"bad_token"
+// so the feed distinguishes the lane; WHITELISTED fields only - never the
+// presented token / any credential material. Best-effort by construction: the
+// monitor never throws into the auth response path.
+const syncFailMonitor = createFailedLoginMonitor({
+  store,
+  env: process.env,
+  surface: "sync",
+  defaultReason: "bad_token",
+  windowMs: SYNC_AUTH_FAIL_WINDOW_MS,
+});
+liveAuthMonitors.push(syncFailMonitor); // bell count stays true beyond the cap
+function recordSyncAuthFailure(req, reason) {
+  try {
+    syncFailMonitor.record(req, reason);
+  } catch {
+    /* visibility is telemetry - never let it break the auth response */
+  }
+}
+
+// Sync bearer-token gate: 501 unless the sync surface is enabled (real mode +
+// SYNC_TOKEN_HASH), constant-time token verify, per-IP failure counter -> 429.
+function syncAuth(req, res, next) {
+  if (DEMO_MODE) return res.status(501).json({ error: "sync is disabled in demo mode" });
+  if (!runtime.syncEnabled) return res.status(501).json({ error: "sync is not configured on this instance" });
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const f = syncAuthFailures.get(ip);
+  if (f && f.resetAt > now && f.count >= SYNC_AUTH_MAX_FAILURES) {
+    recordSyncAuthFailure(req, "rate_limited");
+    return res.status(429).json({ error: "too many failed sync-auth attempts; try again later" });
+  }
+  const hdr = req.get("authorization") || "";
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : "";
+  if (!verifyRunnerToken(token, process.env.SYNC_TOKEN_HASH)) {
+    const rec = f && f.resetAt > now ? f : { count: 0, resetAt: now + SYNC_AUTH_FAIL_WINDOW_MS };
+    rec.count += 1;
+    syncAuthFailures.set(ip, rec);
+    recordSyncAuthFailure(req, "bad_token"); // GC-2(c)-partial: feed SIM-386
+    return res.status(401).json({ error: "invalid sync token" });
+  }
+  syncAuthFailures.delete(ip); // reset the failure window on a good auth
+  next();
+}
+
+// Registered BEFORE the cookie auth gate (see the mount block above). All four
+// routes are insert-only + report; the store methods do the additive-only writes.
+function mountSyncRoutes() {
+  // Metadata + hashes only, never file bytes (design B2).
+  app.get("/api/sync/manifest", syncAuth, (req, res) => {
+    try {
+      res.json(store.syncManifest());
+    } catch (e) {
+      res.status(500).json({ error: "manifest failed" });
+    }
+  });
+
+  // INSERT a job row (raw fidelity). 201 created | 409 job-exists | 400 invalid.
+  app.post("/api/sync/jobs", syncAuth, (req, res) => {
+    const b = req.body || {};
+    try {
+      const r = store.createJobIfAbsent({
+        id: b.id,
+        role: b.role,
+        employer: b.employer,
+        front: b.front == null ? {} : b.front,
+        body: typeof b.body === "string" ? b.body : "",
+        tags: b.tags,
+        mtimeIso: typeof b.mtimeIso === "string" ? b.mtimeIso : null,
+      });
+      if (r.created) {
+        store.appendActivity({ kind: "sync", event: "job-inserted", id: r.id });
+        broadcast({ type: "jobs-changed" });
+        return res.status(201).json({ created: true, id: r.id });
+      }
+      return res.status(409).json({ conflict: "job-exists" });
+    } catch (e) {
+      return res.status(e.httpStatus || 400).json({ error: e.message });
+    }
+  });
+
+  // INSERT a companion file (raw bytes, capped). 201 inserted | 200 noop |
+  // 409 bytes-differ | 404 unknown job | 400 bad name / sha mismatch | 413 over cap.
+  app.put(
+    "/api/sync/jobs/:id/files/:name",
+    syncAuth,
+    express.raw({ type: () => true, limit: SYNC_FILE_MAX_BYTES }),
+    (req, res) => {
+      const name = req.params.name;
+      if (!isSafeName(name)) return res.status(400).json({ error: "bad file name" });
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (!body.length) return res.status(400).json({ error: "empty file body" });
+      // Transport integrity: if the client declares a sha256, the server re-hashes
+      // the body and refuses on mismatch (design B2).
+      const declaredSha = (req.get("x-file-sha256") || "").trim().toLowerCase();
+      const actualSha = sha256Hex(body);
+      if (declaredSha && declaredSha !== actualSha) {
+        return res.status(400).json({ error: "x-file-sha256 does not match the request body" });
+      }
+      const mime = (req.get("x-file-mime") || "").split(";")[0].trim() || null;
+      const mtimeIso = req.get("x-file-mtime") || null;
+      let r;
+      try {
+        r = store.addJobFileIfAbsent(req.params.id, name, { mime, mtimeIso, bytes: body });
+      } catch (e) {
+        return res.status(e.httpStatus || 400).json({ error: e.message });
+      }
+      if (r.result === "job-not-found") return res.status(404).json({ error: "unknown job" });
+      if (r.result === "inserted") {
+        store.appendActivity({ kind: "sync", event: "file-inserted", id: req.params.id, name, sha256: r.sha256 });
+        broadcast({ type: "jobs-changed" });
+        return res.status(201).json({ inserted: true, name, sha256: r.sha256 });
+      }
+      if (r.result === "noop") return res.status(200).json({ noop: true, name, sha256: r.sha256 });
+      if (r.result === "bytes-differ") {
+        // A loud conflict record: the cloud copy is untouched, both byte-sets survive
+        // (the vault keeps its bytes). Filed to the activity feed for owner visibility.
+        store.appendActivity({
+          kind: "sync",
+          event: "conflict",
+          reason: "bytes-differ",
+          id: req.params.id,
+          name,
+          vaultSha: r.sha256,
+          cloudSha: r.cloudSha,
+        });
+        return res.status(409).json({ conflict: "bytes-differ", cloudSha: r.cloudSha });
+      }
+      return res.status(500).json({ error: "unexpected sync result" });
+    },
+  );
+
+  // Append ONE structured summary line per run so every sync + every conflict is
+  // visible in the activity feed (design B2). Schema-validated fields only.
+  app.post("/api/sync/runs", syncAuth, (req, res) => {
+    const b = req.body || {};
+    const ins = b.inserted && typeof b.inserted === "object" ? b.inserted : {};
+    store.appendActivity({
+      kind: "sync",
+      event: "sync-run",
+      startedAt: typeof b.startedAt === "string" ? b.startedAt : null,
+      finishedAt: typeof b.finishedAt === "string" ? b.finishedAt : null,
+      inserted: { jobs: Number(ins.jobs) || 0, files: Number(ins.files) || 0 },
+      noops: Number(b.noops) || 0,
+      conflicts: Array.isArray(b.conflicts) ? b.conflicts.slice(0, 200) : [],
+      clientVersion: typeof b.clientVersion === "string" ? b.clientVersion.slice(0, 64) : null,
+    });
+    res.status(201).json({ ok: true });
   });
 }
 
@@ -1847,12 +2045,64 @@ function deriveDiffEvents(baseline, tasks, projects, nowIso) {
   return events;
 }
 
+// SIM-386: fold failed-login visibility lines (kind:"auth", written by the
+// monitor in server/auth.js) into notifications. Exactly ONE event per alert
+// window: the monitor appends a single "login_failures_threshold" line the
+// first time a window's failure count crosses the threshold, and this fold
+// keys events by that line's windowStart - so however many failures follow in
+// the same window, the bell shows one entry. The title carries the LIVE count
+// for the window (counted from the per-failure lines sharing the windowStart),
+// so "3 failed login attempts" grows to "7" if the attack continues, without a
+// second notification. With auth off nothing ever writes kind:"auth" lines, so
+// this is a no-op on the historical feed (the auth-off regression guarantee).
+function deriveAuthEvents(records) {
+  const failuresByWindow = new Map();
+  const thresholds = new Map(); // windowStart -> the (single) threshold line
+  for (const r of records) {
+    if (!r || r.kind !== "auth" || typeof r.windowStart !== "string") continue;
+    if (r.event === "login_failed") {
+      failuresByWindow.set(r.windowStart, (failuresByWindow.get(r.windowStart) || 0) + 1);
+    } else if (r.event === "login_failures_threshold" && !thresholds.has(r.windowStart)) {
+      thresholds.set(r.windowStart, r);
+    }
+  }
+  // Guardian condition 1 overlay: beyond FAILED_LOGIN_DURABLE_CAP the log
+  // deliberately stops growing, so line-counting undercounts a flood. Each
+  // in-memory monitor holds the TRUE rolling count for the window it is
+  // currently in; overlay it by windowStart so the bell stays exact.
+  for (const m of liveAuthMonitors) {
+    const live = m && m.snapshot ? m.snapshot() : null;
+    if (live && typeof live.windowStart === "string") {
+      failuresByWindow.set(
+        live.windowStart,
+        Math.max(failuresByWindow.get(live.windowStart) || 0, Number(live.count) || 0),
+      );
+    }
+  }
+  const events = [];
+  for (const [windowStart, alert] of thresholds) {
+    const count = Math.max(failuresByWindow.get(windowStart) || 0, Number(alert.count) || 0);
+    events.push({
+      id: `auth-fail:${windowStart}`,
+      type: "login_failed",
+      ts: typeof alert.ts === "string" ? alert.ts : windowStart,
+      title: `${count} failed login attempt${count === 1 ? "" : "s"}`,
+      ref: { kind: "auth", count },
+    });
+  }
+  return events;
+}
+
 // Assemble the full derived feed once (activity + diff), newest-first, tagging
 // each event's `unread` and stripping the internal `_unread` marker. Shared by
 // GET (returns it) and POST /read (looks up an event's ts by id).
 function buildNotifications(state, tasks, projects, records, nowIso) {
   const cursor = state.cursor;
-  const raw = [...deriveActivityEvents(records), ...deriveDiffEvents(state.baseline, tasks, projects, nowIso)];
+  const raw = [
+    ...deriveActivityEvents(records),
+    ...deriveAuthEvents(records),
+    ...deriveDiffEvents(state.baseline, tasks, projects, nowIso),
+  ];
   const events = raw.map((e) => {
     const unread = e._unread === true || (typeof e.ts === "string" && (cursor === null || e.ts > cursor));
     const { _unread, ...rest } = e;

@@ -415,6 +415,8 @@ The report endpoint validates loudly (new-field ADR-016 posture): each counter p
 | `run` (start) | `{ ts, kind:"run", runId, routine, label, jobId, batchId?, status:"running" }` |
 | `run` (close) | `{ ts, kind:"run", runId, status: "done"\|"failed"\|"stopped", exitCode, batchId? }` |
 | `delegation` | `{ ts, kind:"delegation", ...hook-supplied fields, open-ended }` |
+| `auth` (failure) | `{ ts, kind:"auth", event:"login_failed", reason:"bad_passphrase"\|"rate_limited"\|"bad_token", surface?, ip, userAgent, count, windowStart }` — SIM-386; login surface (auth ON) and the SIM-393 sync surface (`surface:"sync"`, `reason:"bad_token"`); **never** carries the attempted passphrase/token or any credential material (whitelisted fields only). **Bounded** (guardian condition): at most 20 failure lines per window per surface reach the log; beyond that only the in-memory counter (and a sampled stdout heartbeat) advances |
+| `auth` (alert) | `{ ts, kind:"auth", event:"login_failures_threshold", surface?, count, threshold, windowMs, windowStart }` — appended exactly once per alert window; the notification feed folds these into one `login_failed` bell event per window (count overlaid with the live in-memory total, so it stays exact beyond the durable cap) |
 
 **`batchId`** is stamped on both the start and close line of every run in a fan-out batch (e.g. batch-draft, run-all-due); a batch surfaces as one `wave_done` notification only once every run sharing that id reaches a terminal status. A run with no `batchId` emits its own individual `run_finished` notification.
 
@@ -650,6 +652,16 @@ These are **observations, not fixes** — flagged here for the CTO / W1b governa
 ## 7. Data contract guarantees (absorbed from `DATA_CONTRACT.md`)
 
 **Doc-topology note (2026-07-04, per the W1b audit and owner ruling):** `DATA_CONTRACT.md` lived at the repo root, outside `docs/`, which made it invisible to the app's own document hub (the hub serves only `docs/` + whitelisted subdirectories) — a governance/spec document the app itself cannot show the owner. The standing rule going forward: **every governance/SOP/spec/schema document lives in the hub.** This section is that content, absorbed into the one canonical, hub-visible data reference; `DATA_CONTRACT.md` at the repo root is now a short pointer to this section (kept at root only for repo-browsing discoverability — a contributor scanning the repo root before finding `docs/` at all). There is exactly one source of truth for these guarantees from now on: this section. Nothing here duplicates content maintained elsewhere — every guarantee below points at the entity section (§2) that carries the full field-level detail; this section states the *policy*, §2 states the *mechanism*.
+
+### 7.0 Data-at-rest disclosure: the private cloud instance (D1 amendment, executed 2026-07-16)
+
+Per the MODE-4 amendment to the kernel contract (`company-os/decisions/2026-07-16-data-contract-amendment-cloud.md`, executed at RC-2 cutover with Simon authorizing as data subject), the real job-hunt dataset has a SECOND authorized data-at-rest location: the **jobhunt-private Railway instance** (project `261ea825`, managed Postgres, private networking, encrypted at rest and in transit). Everything in §2 maps 1:1 onto its Postgres schema through the Store seam (`server/store.js` / `pg-store.js` in the cloud repo); the migration into it is byte-verified through that same seam.
+
+- **Access path (owner decision, 2026-07-16):** a public Railway domain with **required strong auth** — every `/api/*` route 401s without a valid session; login is Argon2id passphrase, rate-limited; TLS + HSTS. No anonymous route to any data.
+- **The four guarantees hold there verbatim** — never auto-submits, never deletes, disclosure before departure; "loopback-only" is satisfied by the auth wall + private DB networking instead of the bind address.
+- **The local file path is FROZEN, not deleted.** This laptop app keeps reading/writing the data zone exactly as documented below; the cloud instance is a separate deployment over the migrated copy. Neither writes to the other.
+- **No Anthropic key, no `claude.exe`, no agent execution on the cloud instance** (D5): agent runs stay laptop-side; the cloud holds only a verify-only sha256 of the runner token.
+- **Failed logins are visible, never silent (SIM-386, guardian RR-1).** Every failed attempt against the auth wall is logged to the platform stream and recorded as a `kind:"auth"` activity-log line (§2.9: timestamp, proxy-derived IP, user-agent, reason, rolling count — **never** the attempted passphrase or any credential material); 3+ failures in a 15-min window surface exactly one "N failed login attempts" notification in the app bell, and recent events are readable authed at `GET /api/auth/failed-logins`. No new data leaves the instance — this is in-app + platform-log visibility only.
 
 ### 7.1 What the app may do
 
