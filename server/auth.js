@@ -1,4 +1,4 @@
-﻿// Feature-flagged app-level auth for the jobhunt file bridge (SIM-85 / RC-1).
+// Feature-flagged app-level auth for the jobhunt file bridge (SIM-85 / RC-1).
 //
 // Design contract (see ADR-024 in docs/governance.md):
 //   - DEFAULT OFF. With no passphrase hash configured and JOBHUNT_AUTH unset,
@@ -256,6 +256,45 @@ export function createLoginLimiter(env = process.env, { onLimited = null } = {})
         }
       }
       res.status(429).json({ error: "too many login attempts, try again later" });
+    },
+  });
+}
+
+// ---- demo write rate limiter (SIM-388) --------------------------------------
+// The public demo is intentionally writable with auth OFF, which made its write
+// routes an unthrottled anonymous write surface (the SIM-392 load probe put 150
+// rapid POST /api/tasks through with zero 429s). This limiter caps WRITE verbs
+// (POST/PUT/PATCH/DELETE) per IP per minute; reads are NEVER limited (skip), so
+// browsing the demo stays unthrottled. Mounted by index.js ONLY in demo mode -
+// the real instance's writes sit behind the auth gate + login limiter already,
+// and double-limiting an authenticated owner would be a regression.
+//
+// IP extraction rides the SAME trust decision as the login limiter: index.js
+// sets Express `trust proxy` from the explicit JOBHUNT_TRUST_PROXY opt-in, so
+// req.ip (the limiter's default key) is the X-Forwarded-For CLIENT address only
+// behind the declared terminator and the raw socket peer otherwise - never a
+// raw XFF read.
+//
+// Defaults: 60 writes / 1 min per IP. Env-overridable so a test can drive the
+// 429 cheaply and an operator can retune without a code change. The 429 body is
+// pinned by tests/demo-write-limit.test.js.
+export const DEMO_WRITE_LIMIT_BODY = {
+  error: "demo rate limit: too many writes from this address - try again in a minute",
+};
+const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+export function createDemoWriteLimiter(env = process.env) {
+  const max = Number(env.JOBHUNT_DEMO_WRITE_RATELIMIT_MAX) || 60;
+  const windowMs = Number(env.JOBHUNT_DEMO_WRITE_RATELIMIT_WINDOW_MS) || 60 * 1000;
+  return rateLimit({
+    windowMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    // Reads (GET/HEAD/OPTIONS) are never limited AND never counted.
+    skip: (req) => !WRITE_METHODS.has(req.method),
+    handler: (req, res) => {
+      res.status(429).json(DEMO_WRITE_LIMIT_BODY);
     },
   });
 }

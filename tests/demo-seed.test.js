@@ -85,6 +85,89 @@ describe("demo seed determinism", () => {
   });
 });
 
+// SIM-390 item 5 - the discovery/velocity texture (journey-spec 3.3/3.4) and the
+// refDate anchoring that keeps it CURRENT on the live demo.
+describe("seed texture (SIM-390 item 5)", () => {
+  const DAY = 86400000;
+
+  it("every source carries run history (no 'Never run' pills) with honest counters", () => {
+    const ds = generate(1);
+    expect(ds.sources.length).toBeGreaterThanOrEqual(3);
+    for (const s of ds.sources) {
+      expect(s.lastRunAt).toBeTruthy();
+      expect(s.runs.length).toBeGreaterThan(0);
+      for (const r of s.runs) {
+        expect(r.outcome).toBe("succeeded");
+        expect(r.startedAt).toBeTruthy();
+        expect(typeof r.leadsFound).toBe("number");
+        expect(typeof r.candidatesReviewed).toBe("number");
+      }
+      // lastRunAt agrees with the newest run record.
+      const newest = [...s.runs].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1))[0];
+      expect(s.lastRunAt).toBe(newest.startedAt);
+    }
+  });
+
+  it("seeds a non-empty, unambiguously fictional finds list (Discovery is not blank)", () => {
+    const ds = generate(1);
+    expect(ds.finds.length).toBeGreaterThanOrEqual(5);
+    const anchorMs = Date.parse(ds.anchor + "T00:00:00Z");
+    for (const f of ds.finds) {
+      expect(f.Title).toBeTruthy();
+      expect(f.Employer).toBeTruthy();
+      expect(f.Link).toContain("demo.example.test"); // fictional TLD, never a real posting
+      expect(f.sourceId).toBeTruthy();
+      expect(ds.sources.some((s) => s.id === f.sourceId)).toBe(true);
+      // Date Found sits within the recent-texture window (<= 14 days before anchor).
+      const age = (anchorMs - Date.parse(f["Date Found"] + "T00:00:00Z")) / DAY;
+      expect(age).toBeGreaterThanOrEqual(0);
+      expect(age).toBeLessThanOrEqual(14);
+    }
+    // A triage spread: mostly new, at least one decided.
+    expect(ds.finds.filter((f) => f.Decision === "").length).toBeGreaterThanOrEqual(3);
+    expect(ds.finds.some((f) => f.Decision !== "")).toBe(true);
+  });
+
+  it("applied dates give the velocity chart movement in the current two weeks", () => {
+    const ds = generate(1);
+    const anchorMs = Date.parse(ds.anchor + "T00:00:00Z");
+    const appliedAges = ds.jobs
+      .filter((j) => j.applied)
+      .map((j) => (anchorMs - Date.parse(j.applied + "T00:00:00Z")) / DAY);
+    expect(appliedAges.length).toBeGreaterThanOrEqual(3);
+    // At least two applications inside the anchor's current week, one in the
+    // prior week - the chart can no longer stall at "-2w" (the QA finding).
+    expect(appliedAges.filter((d) => d < 7).length).toBeGreaterThanOrEqual(2);
+    expect(appliedAges.filter((d) => d >= 7 && d < 14).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("refDate re-anchors every relative date to that calendar day, deterministically", () => {
+    const ref = new Date("2026-07-17T15:30:00Z");
+    const a = generate(1, { refDate: ref });
+    const b = generate(1, { refDate: new Date("2026-07-17T02:00:00Z") }); // same UTC day
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b)); // byte-identical within a day
+    expect(a.anchor).toBe("2026-07-17");
+    // Source history reads recent relative to the refDate...
+    const refMs = Date.parse("2026-07-17T00:00:00Z");
+    for (const s of a.sources) {
+      const age = (refMs - Date.parse(s.lastRunAt)) / DAY;
+      expect(age).toBeGreaterThanOrEqual(0);
+      expect(age).toBeLessThanOrEqual(7);
+    }
+    // ...and lead/queued deadlines land AHEAD of it (the auto-close sweep can
+    // never eat the top of the funnel on a live demo day).
+    for (const j of a.jobs) {
+      if (!j.deadline) continue;
+      expect(Date.parse(j.deadline + "T00:00:00Z")).toBeGreaterThan(refMs);
+    }
+  });
+
+  it("without refDate the seed stays hermetic (fixed anchor, no wall-clock input)", () => {
+    const ds = generate(1);
+    expect(ds.anchor).toBe("2026-07-01"); // the pinned hermetic anchor
+  });
+});
+
 describe("applySeed through the Store seam (FileStore)", () => {
   let root, store;
   beforeEach(() => {

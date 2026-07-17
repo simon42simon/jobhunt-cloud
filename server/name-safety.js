@@ -29,8 +29,10 @@ export const NAME_MAX_LEN = 255;
 
 // Windows reserved device names (case-insensitive), with or without an extension:
 // `NUL`, `NUL.txt`, `com1.md` etc. all resolve to the device on Windows.
+// CONIN$/CONOUT$ (the console input/output pseudo-devices) included per the
+// guardian's 2026-07-17 deploy-gate re-check.
 const WINDOWS_RESERVED = new Set([
-  "con", "prn", "aux", "nul",
+  "con", "prn", "aux", "nul", "conin$", "conout$",
   "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8", "com9",
   "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ]);
@@ -68,6 +70,11 @@ export function isSafeName(name) {
   // but this keeps the load-bearing invariant explicit and total).
   if (path.posix.basename(name) !== name) return false;
   if (path.win32.basename(name) !== name) return false;
+  // Windows trailing dot/space aliasing (guardian 2026-07-17): win32 silently
+  // strips trailing dots and spaces, so "file.txt." / "file.txt " alias
+  // "file.txt" once written on the laptop - two distinct cloud names, one
+  // laptop file (a clobber primitive). Reject the aliasing forms outright.
+  if (/[. ]$/.test(name)) return false;
   if (isWindowsReserved(name)) return false;
   return true;
 }

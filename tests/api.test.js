@@ -81,6 +81,24 @@ describe("GET /api/config", () => {
     expect(res.body.statuses).toContain("lead");
     expect(Object.keys(res.body.tracks)).toContain("industry_outreach_focused");
   });
+
+  it("declares SSE available on the file backend (SIM-390 item 3)", async () => {
+    const res = await request(app).get("/api/config");
+    expect(res.body.sse).toBe(true); // pg backends declare false - see demo-mode.test.js
+  });
+});
+
+describe("GET /api/jobs/:id/chat (SIM-390 item 4)", () => {
+  it("is 200 + empty for an existing job with no transcript", async () => {
+    const res = await request(app).get(`/api/jobs/${id("Alpha Role - Alpha Co")}/chat`);
+    expect(res.status).toBe(200);
+    expect(res.body.messages).toEqual([]);
+  });
+
+  it("404s only for a job that does not exist", async () => {
+    const res = await request(app).get(`/api/jobs/${id("No Such Role - Nowhere Co")}/chat`);
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("GET /api/jobs", () => {

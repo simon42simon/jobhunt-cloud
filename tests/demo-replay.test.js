@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { agentEventToUpdate } from "../server/lib.js";
-import { loadTranscriptLines } from "../demo/replay.mjs";
+import { loadTranscriptLines, personalizeTranscriptLines } from "../demo/replay.mjs";
 
 process.env.JOBHUNT_TEST = "1";
 const bootDir = fs.mkdtempSync(path.join(os.tmpdir(), "demo-replay-boot-"));
@@ -17,9 +17,9 @@ const { ROUTINES } = await import("../server/index.js");
 
 // Mimic startRun's fold: run each transcript line through agentEventToUpdate,
 // threading stageIndex + sawTranscript exactly as the pump does.
-function replay(kind) {
+function replay(kind, personalize = {}) {
   const def = ROUTINES[kind];
-  const lines = loadTranscriptLines(kind);
+  const lines = loadTranscriptLines(kind, personalize);
   let stageIndex = -1;
   let saw = false;
   let output = "";
@@ -75,5 +75,53 @@ describe("scopeIdExists is store-agnostic (the Beat-3 404 regression)", () => {
     const src = fs.readFileSync(new URL("../server/index.js", import.meta.url), "utf8");
     const body = /function scopeIdExists\(scope, id\) \{[\s\S]*?\n\}/.exec(src)?.[0] || "";
     expect(body).toContain("store.getJobSummary(id) || store.jobFolderPath(id)");
+  });
+});
+
+// SIM-390 item 2: the canned transcript is recorded against a placeholder job
+// ("Jobs/Demo/Operations Analyst.md"); the replay must name the job it actually
+// runs against, not the placeholder.
+describe("replay transcript personalization (SIM-390)", () => {
+  const job = { jobFolder: "Systems Engineer - Kestrel Aerospace", jobFile: "Systems Engineer.md" };
+
+  it("names the actual replayed job in the run-panel transcript", () => {
+    const r = replay("first-draft-job", job);
+    expect(r.output).toContain("Systems Engineer - Kestrel Aerospace/Systems Engineer.md");
+    expect(r.output).not.toContain("Demo/Operations Analyst.md");
+  });
+
+  it("finalize-job personalizes too, and stages still advance", () => {
+    const r = replay("finalize-job", job);
+    expect(r.output).toContain("Systems Engineer - Kestrel Aerospace/Systems Engineer.md");
+    expect(r.stageIndex).toBeGreaterThan(0); // stage regexes still match the rewritten paths
+    expect(r.stats.costUsd).toBe(0);
+  });
+
+  it("every personalized line is still valid stream-json (JSON-escaped substitution)", () => {
+    const lines = loadTranscriptLines("first-draft-job", {
+      jobFolder: 'Weird "Role" - Back\\slash Co',
+      jobFile: 'Weird "Role".md',
+    });
+    for (const l of lines) {
+      expect(() => JSON.parse(l)).not.toThrow();
+    }
+    expect(lines.join("\n")).toContain("Weird \\\"Role\\\"");
+  });
+
+  it("without a job it replays the placeholder untouched (scope-less runs)", () => {
+    const a = loadTranscriptLines("first-draft-job");
+    const b = loadTranscriptLines("first-draft-job", { jobFolder: null, jobFile: null });
+    expect(a).toEqual(b);
+    expect(a.join("\n")).toContain("Jobs/Demo/Operations Analyst.md");
+  });
+
+  it("a role that itself reads 'Operations Analyst' round-trips cleanly", () => {
+    const lines = personalizeTranscriptLines(loadTranscriptLines("first-draft-job"), {
+      jobFolder: "Operations Analyst - Granite Peak Municipal",
+      jobFile: "Operations Analyst.md",
+    });
+    const text = lines.join("\n");
+    expect(text).toContain("Jobs/Operations Analyst - Granite Peak Municipal/Operations Analyst.md");
+    expect(text).not.toContain("Jobs/Demo/");
   });
 });

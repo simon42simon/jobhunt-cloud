@@ -110,14 +110,42 @@ let reconnectTimer: number | null = null;
 let backoffMs = 0;
 let visibilityWired = false;
 
+// Server-declared stream availability (SIM-390 item 3). The pg-backed cloud
+// instances have no working /api/stream (it 503s at the edge), so the server
+// states the capability in GET /api/config (`sse: false`) and the client must
+// never fire the EventSource there. Tri-state:
+//   null  - unknown yet (config not loaded): connection attempts are DEFERRED,
+//           not fired-and-503'd; the first setStreamAvailability call resolves
+//           pending subscribers.
+//   true  - available: connect (and reconnect) normally.
+//   false - unavailable: never connect; tear down anything live.
+let streamAvailable: boolean | null = null;
+
+export function setStreamAvailability(available: boolean): void {
+  if (streamAvailable === available) return;
+  streamAvailable = available;
+  if (!IN_BROWSER) return;
+  if (!available) {
+    // Tear down: close the live socket and stop any pending reconnect.
+    clearReconnect();
+    if (source) {
+      source.close();
+      source = null;
+    }
+    return;
+  }
+  // Became available: serve any subscribers who were waiting on the answer.
+  if (subscribers.size > 0) ensureConnected();
+}
+
 function ensureConnected(): void {
-  if (!IN_BROWSER || source) return;
+  if (!IN_BROWSER || source || streamAvailable === false || streamAvailable === null) return;
   wireVisibility();
   connect();
 }
 
 function connect(): void {
-  if (!IN_BROWSER || source) return;
+  if (!IN_BROWSER || source || streamAvailable !== true) return;
   clearReconnect();
   try {
     source = new EventSource("/api/stream");
@@ -147,6 +175,7 @@ function connect(): void {
 
 function scheduleReconnect(): void {
   if (!IN_BROWSER || reconnectTimer !== null || source) return;
+  if (streamAvailable !== true) return; // unavailable/unknown - no reconnect loop
   if (subscribers.size === 0) return; // nothing to feed - stay disconnected
   // Do not spend reconnect attempts while hidden; visibilitychange kicks it.
   if (typeof document !== "undefined" && document.hidden) return;
@@ -185,9 +214,16 @@ function wireVisibility(): void {
 // the re-evaluated module opens exactly one fresh connection instead of leaking
 // a second. `import.meta.hot` is dev-only; typed loosely so this file needs no
 // vite/client ambient types.
-const viteHot = (import.meta as unknown as { hot?: { dispose(cb: () => void): void } }).hot;
+const viteHot = (import.meta as unknown as { hot?: { data?: Record<string, unknown>; dispose(cb: (data: Record<string, unknown>) => void): void } }).hot;
 if (viteHot) {
-  viteHot.dispose(() => {
+  // Carry the resolved availability across a hot swap (hot.data survives the
+  // module re-evaluation): App.tsx only calls setStreamAvailability once per
+  // page load, so without this a hot swap of THIS module would strand the fresh
+  // instance in the deferred "unknown" state until a full reload.
+  const carried = viteHot.data && viteHot.data.streamAvailable;
+  if (carried === true || carried === false) streamAvailable = carried;
+  viteHot.dispose((data) => {
+    data.streamAvailable = streamAvailable;
     if (source) {
       source.close();
       source = null;

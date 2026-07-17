@@ -29,19 +29,44 @@ const GENERIC_LINES = [
   JSON.stringify({ type: "result", subtype: "success", duration_ms: 20000, num_turns: 2, total_cost_usd: 0, result: "Demo action complete." }),
 ];
 
+// The canned transcripts are recorded against a placeholder job: folder "Demo",
+// job file "Operations Analyst.md" (both inside "Jobs/Demo/..." paths). SIM-390
+// item 2: the run panel showed "Writing Demo/Operations Analyst.md" no matter
+// which job the visitor replayed. personalizeTranscriptLines rewrites those
+// placeholders IN THE RAW JSONL (values are JSON-escaped so a folder name with a
+// quote/backslash can never tear a line) so the replay names the job it actually
+// runs against. Order matters: the job-FILE placeholder is replaced first, then
+// the folder, so a role that itself reads "Operations Analyst" round-trips.
+const PLACEHOLDER_FOLDER = "Jobs/Demo/";
+const PLACEHOLDER_JOB_FILE = "Operations Analyst.md";
+const jsonEscape = (s) => JSON.stringify(String(s)).slice(1, -1);
+
+export function personalizeTranscriptLines(lines, { jobFolder, jobFile } = {}) {
+  if (!jobFolder) return lines;
+  const folder = `Jobs/${jsonEscape(jobFolder)}/`;
+  const file = jsonEscape(jobFile || `${jobFolder}.md`);
+  return lines.map((l) =>
+    String(l).split(PLACEHOLDER_JOB_FILE).join(file).split(PLACEHOLDER_FOLDER).join(folder),
+  );
+}
+
 // Return the raw JSONL lines for a routine kind (each line is a stream-json event,
 // ready to feed through the same applyLine pump a real run uses). Tolerant: a
 // missing/broken transcript falls back to the generic lines so the demo never hangs.
-export function loadTranscriptLines(kind) {
+// Pass { jobFolder, jobFile } to personalize the placeholder job paths (SIM-390).
+export function loadTranscriptLines(kind, { jobFolder = null, jobFile = null } = {}) {
   const name = KIND_MAP[kind];
-  if (!name) return GENERIC_LINES.slice();
-  try {
-    const raw = fs.readFileSync(path.join(TRANSCRIPT_DIR, `${name}.jsonl`), "utf8");
-    const lines = raw.split(/\r?\n/).filter((l) => l.trim());
-    return lines.length ? lines : GENERIC_LINES.slice();
-  } catch {
-    return GENERIC_LINES.slice();
-  }
+  const lines = (() => {
+    if (!name) return GENERIC_LINES.slice();
+    try {
+      const raw = fs.readFileSync(path.join(TRANSCRIPT_DIR, `${name}.jsonl`), "utf8");
+      const ls = raw.split(/\r?\n/).filter((l) => l.trim());
+      return ls.length ? ls : GENERIC_LINES.slice();
+    } catch {
+      return GENERIC_LINES.slice();
+    }
+  })();
+  return personalizeTranscriptLines(lines, { jobFolder, jobFile });
 }
 
 // The transcript filenames the guard scans (design 5.4 / MF-11: the guard must

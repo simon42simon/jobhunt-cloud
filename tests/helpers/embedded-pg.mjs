@@ -14,6 +14,14 @@
 //     tests/helpers/README-pg.md for the de-elevated scheduled-task recipe.
 // In either case the provisioners return { available:false, reason }, the caller
 // omits the PgStore backend, and `npm run check` stays green everywhere.
+//
+// EXCEPT under REQUIRE_EMBEDDED_PG=1 (guardian deploy-gate re-check, 2026-07-17):
+// on a runner that is SUPPOSED to exercise the PG legs (CI, a de-elevated local
+// shell), a silent describe.skip made every PG suite vacuously green while a
+// broken migration shipped. With the flag set, a provisioning failure THROWS
+// instead - the suites provision at module top-level, so the throw hard-fails
+// the suite file loudly. Local elevated shells simply leave the flag unset and
+// keep the clean-skip behavior.
 
 import EmbeddedPostgres from "embedded-postgres";
 import { runner } from "node-pg-migrate";
@@ -50,6 +58,19 @@ function withTimeout(promise, ms, label) {
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms).unref()),
   ]);
+}
+
+// The one place the "unavailable" outcome is decided (exported for its unit
+// test). Default: the historical clean skip ({ available:false, reason }).
+// REQUIRE_EMBEDDED_PG=1: throw, so the PG legs can never go vacuously green on
+// a runner that must execute them (see header).
+export function pgUnavailable(reason, env = process.env) {
+  if (env.REQUIRE_EMBEDDED_PG === "1") {
+    throw new Error(
+      `REQUIRE_EMBEDDED_PG=1 but the embedded Postgres could not be provisioned: ${reason}`,
+    );
+  }
+  return { available: false, reason };
 }
 
 export async function startCluster() {
@@ -109,7 +130,7 @@ export async function startCluster() {
       e === undefined
         ? "postgres process exited early (likely an elevated/administrative token - run de-elevated)"
         : String((e && e.message) || e);
-    return { available: false, reason };
+    return pgUnavailable(reason);
   }
 }
 
@@ -141,7 +162,7 @@ export async function provisionPgBackend(deps) {
     store = new PgStore({ url: cluster.url, docsDir, blobDir, deps });
   } catch (e) {
     await cluster.stop();
-    return { available: false, reason: String((e && e.message) || e) };
+    return pgUnavailable(String((e && e.message) || e));
   }
 
   const backend = {

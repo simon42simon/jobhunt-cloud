@@ -121,6 +121,11 @@ export interface AppConfig {
   // value that renders the demo chrome (DemoBanner + DemoTour). "real" - or
   // absent, tolerated for older payloads - means zero demo UI.
   appMode?: "demo" | "real";
+  // Server-declared SSE capability (SIM-390 item 3): false on the pg-backed
+  // cloud instances, where GET /api/stream is unavailable and the client must
+  // not fire the EventSource at all (it polls instead). Absent (an older
+  // server) is treated as available.
+  sse?: boolean;
 }
 
 export type PhaseStatus = "shipped" | "in_progress" | "planned" | "later";

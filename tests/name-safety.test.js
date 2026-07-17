@@ -48,6 +48,14 @@ describe("isSafeName - rejects the hostile-name fixtures (guardian condition 1)"
     ["reserved device NUL with ext", "NUL.txt"],
     ["reserved device com1", "com1.md"],
     ["reserved device lpt9", "LPT9.pdf"],
+    // Guardian deploy-gate re-check (2026-07-17): console pseudo-devices + the
+    // win32 trailing dot/space aliasing ("file.txt." and "file.txt " both open
+    // "file.txt" on Windows - two cloud names, one laptop file).
+    ["reserved console device CONIN$", "CONIN$"],
+    ["reserved console device CONOUT$ with ext", "conout$.log"],
+    ["trailing dot (win32 alias of file.txt)", "file.txt."],
+    ["trailing space (win32 alias of file.txt)", "file.txt "],
+    ["trailing dots", "notes.md.."],
     ["empty string", ""],
     ["over the length cap", "x".repeat(NAME_MAX_LEN + 1)],
     ["non-string", 12345],

@@ -38,4 +38,10 @@ jobs:
       # fixable only via a breaking major bump, so it is deferred and documented
       # rather than forced. Gating all deps at high would keep CI permanently red.
       - run: npm audit --omit=dev --audit-level=high
+      # REQUIRE_EMBEDDED_PG=1 (guardian, 2026-07-17): this Linux runner executes
+      # de-elevated, so the embedded-Postgres legs MUST provision here - a
+      # provisioning failure hard-fails the gate instead of silently skipping
+      # every PG suite (which let a broken migration ride a green check).
       - run: npm run check
+        env:
+          REQUIRE_EMBEDDED_PG: "1"

@@ -68,26 +68,38 @@ const FUNNEL = [
 
 const pick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
 
-// A stamp offset N days before a fixed anchor date, so the demo history looks
-// aged without depending on wall-clock (keeps determinism).
-const ANCHOR = Date.UTC(2026, 6, 1); // 2026-07-01
-const dayISO = (daysAgo) => new Date(ANCHOR - daysAgo * 86400000).toISOString();
-const dateStamp = (daysAgo) => dayISO(daysAgo).slice(0, 10);
+// A stamp offset N days before an anchor date, so the demo history looks aged.
+// The HERMETIC default anchor is fixed (2026-07-01: no wall-clock input at all,
+// so tests are fully version-pinned). The LIVE demo passes `refDate` (boot /
+// nightly-reset time) instead, truncated to its UTC day: relative dates then
+// read "2d ago", the Insights velocity chart shows movement in the current
+// weeks, and the seed stays deterministic - every seed/reset on the same
+// calendar day is byte-identical (SIM-390 item 5; same pattern as the
+// deployed demo's BUG-4 deadline fix).
+const ANCHOR = Date.UTC(2026, 6, 1); // 2026-07-01 (hermetic default)
+function anchorMsOf(refDate) {
+  if (!refDate) return ANCHOR;
+  const d = refDate instanceof Date ? refDate : new Date(refDate);
+  const ms = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  return Number.isFinite(ms) ? ms : ANCHOR;
+}
 
 // ---- dataset generator ------------------------------------------------------
-// Returns a plain, deterministic domain dataset. `seedVersion` (int) pins the RNG.
-// `refDate` (optional Date) anchors the lead/queued deadlines 1-5 weeks AHEAD of
-// it, so the board reads "due in 12d" instead of "26805d left" (QA BUG-4) while
-// staying deterministic: the date is truncated to its UTC day, so every seed/reset
-// on the same calendar day is byte-identical, and the nightly reset re-seeds with
-// a fresh day before any deadline can lapse into the auto-close sweep. Without
-// refDate the deadlines fall back to fixed far-future dates (the hermetic-test
-// posture - fully version-pinned, no wall-clock input at all).
-export function generate(seedVersion = 1, { refDate } = {}) {
-  const refDay = refDate ? Date.UTC(refDate.getUTCFullYear(), refDate.getUTCMonth(), refDate.getUTCDate()) : null;
+// Returns a plain, deterministic domain dataset. `seedVersion` (int) pins the RNG;
+// `refDate` (optional Date) anchors every relative date to that calendar day
+// (omitted = the fixed hermetic anchor). Deadlines additionally keep the BUG-4
+// posture: with refDate they land 1-5 weeks AHEAD of it (so the board reads
+// "due in 12d", and the nightly reset re-seeds with a fresh day before any
+// deadline can lapse into the auto-close sweep); without refDate they fall back
+// to fixed far-future dates (the hermetic-test posture - fully version-pinned,
+// no wall-clock input at all, and the sweep can never eat the funnel).
+export function generate(seedVersion = 1, { refDate = null } = {}) {
+  const anchorMs = anchorMsOf(refDate);
+  const dayISO = (daysAgo) => new Date(anchorMs - daysAgo * 86400000).toISOString();
+  const dateStamp = (daysAgo) => dayISO(daysAgo).slice(0, 10);
   const deadlineFor = (i) =>
-    refDay
-      ? new Date(refDay + (7 + (i % 5) * 7) * 86400000).toISOString().slice(0, 10)
+    refDate
+      ? new Date(anchorMs + (7 + (i % 5) * 7) * 86400000).toISOString().slice(0, 10)
       : `2099-12-${String(1 + (i % 28)).padStart(2, "0")}`;
   const rng = mulberry32(1000 + Number(seedVersion || 1));
 
@@ -116,7 +128,10 @@ export function generate(seedVersion = 1, { refDate } = {}) {
     // Fit skews strong/moderate near the top of the funnel (a real user doesn't
     // queue jobs they don't fit); one deliberate stretch lands via the rng tail.
     const fit = ["lead", "queued"].includes(status) ? pick(rng, ["strong", "strong", "moderate"]) : pick(rng, FITS);
-    const applied = ["submitted", "interview", "offer", "rejected"].includes(status) ? dateStamp(20 - i) : null;
+    // Applied dates spread across the last ~2.5 weeks (1/6/11/16 days before the
+    // anchor) so the Insights velocity chart shows movement in the CURRENT weeks
+    // instead of stalling two-plus weeks back (SIM-390 item 5 / journey-spec 3.3).
+    const applied = ["submitted", "interview", "offer", "rejected"].includes(status) ? dateStamp(1 + (i % 4) * 5) : null;
     // Pre-baked FICTIONAL artifacts for jobs that have progressed far enough.
     const person = `${pick(rng, FIRST_NAMES)} ${pick(rng, LAST_NAMES)}`;
     const artifacts = [];
@@ -213,7 +228,24 @@ export function generate(seedVersion = 1, { refDate } = {}) {
     },
   ];
 
-  // Discovery sources (a couple).
+  // Discovery sources - WITH run history (SIM-390 item 5 / journey-spec 3.4).
+  // Without lastRunAt + runs every source pill read "Never run" and the console
+  // looked abandoned. The run records are shaped exactly like the finalize
+  // path's (normalizeRun keeps startedAt/durationMs/outcome/counters/trigger),
+  // and the timestamps are anchor-relative so a refDate-seeded demo reads
+  // "Ran 2d ago · 6 found" while staying deterministic.
+  const sourceRun = (daysAgo, n, { leadsFound, leadsNew, candidatesReviewed, trigger }) => ({
+    runId: `r-demo-src-${n}`,
+    startedAt: dayISO(daysAgo),
+    durationMs: 240000 + n * 30000,
+    outcome: "succeeded",
+    leadsFound,
+    leadsNew,
+    candidatesReviewed,
+    alreadyTracked: Math.max(0, candidatesReviewed - leadsFound),
+    filteredOut: 0,
+    trigger,
+  });
   const sources = [
     {
       id: "demo-board-1",
@@ -227,6 +259,11 @@ export function generate(seedVersion = 1, { refDate } = {}) {
       outputFields: ["title", "employer"],
       aliases: [],
       tracks: [],
+      lastRunAt: dayISO(2),
+      runs: [
+        sourceRun(9, 1, { leadsFound: 4, leadsNew: 3, candidatesReviewed: 11, trigger: "scheduled" }),
+        sourceRun(2, 2, { leadsFound: 6, leadsNew: 4, candidatesReviewed: 14, trigger: "scheduled" }),
+      ],
     },
     {
       id: "demo-employer-1",
@@ -240,7 +277,58 @@ export function generate(seedVersion = 1, { refDate } = {}) {
       outputFields: ["title"],
       aliases: [],
       tracks: [],
+      lastRunAt: dayISO(5),
+      runs: [sourceRun(5, 3, { leadsFound: 2, leadsNew: 2, candidatesReviewed: 3, trigger: "manual" })],
     },
+    {
+      id: "demo-portal-1",
+      name: "Tidewater Provincial Careers Portal",
+      type: "board",
+      sector: "provincial",
+      active: "yes",
+      urls: ["https://demo.example.test/tidewater-portal"],
+      cadence: "weekly",
+      instructions: "Fictional demo source. Never fetched in demo mode.",
+      outputFields: ["title", "employer", "deadline"],
+      aliases: [],
+      tracks: [],
+      lastRunAt: dayISO(3),
+      runs: [sourceRun(3, 4, { leadsFound: 3, leadsNew: 2, candidatesReviewed: 7, trigger: "scheduled" })],
+    },
+  ];
+
+  // Seeded discovery FINDS (SIM-390 item 5 / journey-spec 3.4: "the Discovery
+  // page is not blank"). Shaped like the workbook's discoveries rows (the
+  // Discovery/Triage UI's `Discovery` type). Served by the server's demo-mode
+  // readDiscovery branch - deliberately NOT written through the store seam
+  // (there is no finds store method; the demo derives them from this generator
+  // on read, exactly as deterministic as the rest of the seed). All fictional.
+  const findRow = (daysAgo, n, { title, employer, sector, track, sourceIdx, decision, tracked = false }) => ({
+    "Date Found": dateStamp(daysAgo),
+    Title: title,
+    Employer: employer,
+    Sector: sector,
+    Track: track,
+    Fit: pick(rng, FITS),
+    Tailoring: pick(rng, ["light", "medium", "heavy"]),
+    Deadline: dateStamp(-(10 + n)), // ahead of the anchor, like the job deadlines
+    Location: "Demoville (fictional)",
+    Source: sources[sourceIdx].name,
+    Link: `https://demo.example.test/finds/${n}`,
+    Decision: decision,
+    Notes: "Fictional demo find.",
+    tracked,
+    sourceId: sources[sourceIdx].id,
+  });
+  const finds = [
+    findRow(1, 1, { title: "Operations Analyst", employer: "Granite Peak Municipal", sector: "municipal", track: "operations_leadership_focused", sourceIdx: 0, decision: "" }),
+    findRow(2, 2, { title: "Logistics Planner", employer: "Ironwood Logistics", sector: "private", track: "operations_leadership_focused", sourceIdx: 0, decision: "" }),
+    findRow(2, 3, { title: "Field Safety Coordinator", employer: "Verdant Fire & Safety", sector: "private", track: "fire_alarm_focused", sourceIdx: 0, decision: "maybe" }),
+    findRow(3, 4, { title: "Public Sector Advisor", employer: "Tidewater Provincial Agency", sector: "provincial", track: "public_sector_focused", sourceIdx: 2, decision: "" }),
+    findRow(3, 5, { title: "Systems Engineer", employer: "Kestrel Aerospace", sector: "federal", track: "aerospace_defence_focused", sourceIdx: 2, decision: "pursue", tracked: true }),
+    findRow(5, 6, { title: "Revenue Operations Manager", employer: "Northwind Analytics", sector: "private", track: "b2b_gtm_focused", sourceIdx: 1, decision: "" }),
+    findRow(5, 7, { title: "GTM Program Manager", employer: "Solstice B2B Cloud", sector: "private", track: "b2b_gtm_focused", sourceIdx: 1, decision: "skip" }),
+    findRow(9, 8, { title: "Higher-Ed Program Lead", employer: "Halcyon University", sector: "bps", track: "higher_ed_generalist_focused", sourceIdx: 0, decision: "" }),
   ];
 
   // A believable activity history: a start+done pair per artifact-bearing job, so
@@ -277,11 +365,27 @@ export function generate(seedVersion = 1, { refDate } = {}) {
     ];
   }
 
-  return { seedVersion: Number(seedVersion || 1), columns, jobs, tasks, requests, sources, activity, chats };
+  return {
+    seedVersion: Number(seedVersion || 1),
+    // The anchor day (YYYY-MM-DD) every relative date is computed from - the
+    // refDate's UTC day, or the fixed hermetic anchor. Exposed for tests.
+    anchor: dateStamp(0),
+    columns,
+    jobs,
+    tasks,
+    requests,
+    sources,
+    finds,
+    activity,
+    chats,
+  };
 }
 
 // ---- apply the dataset through the Store seam (store-agnostic) ---------------
 // Works against any Store (Pg for the cloud demo, File for a test's temp vault).
+// NOTE: ds.finds is deliberately NOT applied here - there is no finds method on
+// the store seam; the demo serves them straight from generate() via the
+// demo-mode readDiscovery branch in server/index.js (SIM-390 item 5).
 export function applySeed(store, ds) {
   // Jobs + their artifacts/notes.
   for (const j of ds.jobs) {

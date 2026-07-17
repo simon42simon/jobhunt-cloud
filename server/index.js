@@ -56,6 +56,7 @@ import {
   parseCorsOrigins,
   buildHelmetOptions,
   isBehindTls,
+  createDemoWriteLimiter,
 } from "./auth.js";
 // Storage seam (RC-3 / SIM-87, ADR-025). Every persistent read/write goes through
 // `store` so a cloud deployment can swap FileStore for PgStore without touching a
@@ -268,9 +269,10 @@ if (runtime.storeBackend === "pg") {
   });
   console.log(`[jobhunt] store backend: PgStore (APP_MODE=${runtime.appMode})`);
   // NOTE: the empty-DB demo seed does NOT run here. applySeed exercises
-  // normalizeSource, whose enum consts (SOURCE_TYPES & co.) are declared
-  // mid-module and are still TDZ at this point of module evaluation - seeding
-  // happens in the boot block at the bottom, after the module fully evaluates.
+  // normalizeSource, whose enum consts (SOURCE_TYPES / RUN_OUTCOMES & co.) are
+  // declared mid-module and are still TDZ at this point of module evaluation -
+  // seeding happens in the boot block at the bottom, after the module fully
+  // evaluates (same fix on both repos; the seed's runs[] made it bite).
 } else {
   store = resolveStore(process.env, {
     jobsDir: JOBS_DIR,
@@ -358,6 +360,18 @@ if (corsOrigins.length) {
 // Explicit JSON body-size cap (states the express.json 100kb default outright).
 // The image-upload route sets its own multipart cap (ATTACHMENT_MAX_BYTES).
 app.use(express.json({ limit: "100kb" }));
+// DEMO-ONLY per-IP write throttle (SIM-388): the public demo takes anonymous
+// writes by design, and the SIM-392 load probe showed 150 rapid POSTs sail
+// through unthrottled. ~60 writes/min/IP on every /api write verb; reads are
+// never limited or counted (see createDemoWriteLimiter). Registered BEFORE the
+// runner/sync mounts and every route so no demo write path can dodge it (those
+// lanes are 501 stubs in demo anyway). Real mode mounts NOTHING here - its
+// writes sit behind the auth gate + login limiter, and double-limiting the
+// authenticated owner would be a regression.
+if (DEMO_MODE) {
+  app.use("/api", createDemoWriteLimiter(process.env));
+  console.log("[jobhunt] demo: per-IP write rate limit armed (SIM-388)");
+}
 // SIM-386 guardian condition 1: every failed-auth monitor registers here so the
 // notification fold can overlay its LIVE in-memory window count - durable lines
 // cap out per window (FAILED_LOGIN_DURABLE_CAP), the true count never does.
@@ -401,6 +415,12 @@ app.get("/api/config", (req, res) => {
     tracks: TRACKS,
     weeklyTarget: config.weeklyTarget || 5,
     appMode: runtime.appMode,
+    // SSE capability signal (SIM-390 item 3): on the pg-backed cloud instances
+    // GET /api/stream 503s at the platform edge and the client silently burned a
+    // request + reconnect loop before falling back to polling. The server states
+    // the capability outright so the client can gate its EventSource on it and
+    // never fire the doomed request. File-backed (laptop/dev) keeps live SSE.
+    sse: runtime.storeBackend !== "pg",
   });
 });
 
@@ -424,6 +444,8 @@ app.get("/healthz", (req, res) => {
 function resetDemoData() {
   if (typeof store.resetAll !== "function") return;
   store.resetAll();
+  // refDate = reset time: the nightly reset re-anchors the seed's relative dates
+  // to the new day (deterministic per calendar day; SIM-390 item 5).
   applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() }));
 }
 // NO anonymous reset surface (MF-10): the endpoint is registered ONLY in demo mode
@@ -2237,7 +2259,8 @@ function scopeIdExists(scope, id) {
   // 404 on the cloud/demo instances - including the demo tour's Beat-3 canned
   // replay. getJobSummary(id) is null-for-missing on BOTH stores. The folder
   // fallback preserves the FileStore edge where a job folder exists without a
-  // parseable job file (still a valid --add-dir target for a run).
+  // parseable job file (still a valid --add-dir target for a run). (Same
+  // class as SIM-390 item 4; this repo shipped it first in 6f4ee04.)
   if (scope === "job") return !!(store.getJobSummary(id) || store.jobFolderPath(id));
   if (scope === "ticket") return ticketExists(id);
   return true;
@@ -2666,7 +2689,23 @@ function maybeAutoAdvanceJob(routine, exitCode, folder) {
 // kick). Zero spawn, zero model spend.
 const DEMO_REPLAY_STEP_MS = Number(process.env.JOBHUNT_DEMO_REPLAY_STEP_MS) || 350;
 function runDemoReplay(run, def, routine) {
-  const lines = loadTranscriptLines(routine);
+  // Personalize the canned transcript's placeholder job ("Jobs/Demo/Operations
+  // Analyst.md") to the job actually being replayed (SIM-390 item 2), so the run
+  // panel reads "Writing <Employer folder>/<Role>.md" instead of always naming
+  // the placeholder. Best-effort: a scope-less run (no jobId) or a lookup miss
+  // replays the transcript untouched.
+  let personalize = {};
+  if (run.jobId) {
+    let role = null;
+    try {
+      const job = store.getJobSummary(run.jobId);
+      role = job && job.role ? job.role : null;
+    } catch {
+      /* personalization is cosmetic - never block the replay */
+    }
+    personalize = { jobFolder: run.jobId, jobFile: role ? `${role}.md` : null };
+  }
+  const lines = loadTranscriptLines(routine, personalize);
   let sawTranscript = false;
   let i = 0;
   const finish = () => {
@@ -3260,18 +3299,24 @@ function runReadOnlyAssistant(prompt) {
   });
 }
 
-// GET the transcript for one job (empty array when none yet).
+// GET the transcript for one job (empty array when none yet). Existence is
+// checked through getJobSummary, NOT jobFolderPath: PgStore has no desktop
+// folder and returns null from jobFolderPath for EVERY job, which made this
+// route 404 on drawer open for every chat-less job on the cloud instances
+// (SIM-390 item 4). A real job with no transcript is a 200 + empty list on
+// both backends; only a nonexistent job 404s.
 app.get("/api/jobs/:id/chat", (req, res) => {
   const folder = req.params.id;
-  if (!store.jobFolderPath(folder)) return res.status(404).json({ error: "job not found" });
+  if (!store.getJobSummary(folder)) return res.status(404).json({ error: "job not found" });
   const chats = store.loadChats();
   res.json({ messages: Array.isArray(chats[folder]) ? chats[folder] : [] });
 });
 
 // POST a message: append it, run the read-only assistant, append the reply, persist.
+// Same store-agnostic existence check as the GET (SIM-390 item 4): getJobSummary
+// works on both backends; jobFolderPath is null for every job on PgStore.
 app.post("/api/jobs/:id/chat", async (req, res) => {
   const folder = req.params.id;
-  if (!store.jobFolderPath(folder)) return res.status(404).json({ error: "job not found" });
   const job = store.getJobSummary(folder);
   if (!job) return res.status(404).json({ error: "job not found" });
   const { message } = req.body || {};
@@ -3473,6 +3518,18 @@ function normalizeDiscoveryDump(json) {
 // /api/discovery and the sources join can never drift on caching or lock
 // handling.
 function readDiscovery(cb) {
+  // DEMO MODE (SIM-390 item 5): the demo box has no discovery workbook and never
+  // shells out to python - serve the deterministic seeded finds straight from the
+  // generator (journey-spec 3.4: "the Discovery page is not blank"). refDate =
+  // today keeps the "Date Found" texture recent, byte-identical within a day.
+  if (DEMO_MODE) {
+    try {
+      const ds = generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() });
+      return cb(null, { config: [], discoveries: ds.finds || [], runLog: [] }, { locked: false });
+    } catch {
+      return cb(null, { config: [], discoveries: [], runLog: [] }, { locked: false });
+    }
+  }
   const seam = process.env.JOBHUNT_DISCOVERY_FINDS;
   if (seam) {
     try {
@@ -5650,6 +5707,27 @@ app.use((err, req, res, next) => {
   res.status((err && err.status) || (err && err.statusCode) || 500).json({ error: "internal server error" });
 });
 
+// Seed a fresh demo DB on boot if it is empty (idempotent-ish: applySeed skips
+// colliding job slugs), so a just-provisioned demo instance comes up populated.
+// Runs HERE, after full module evaluation, never at the store-boot site up top:
+// applySeed goes through normalizeSource, whose enum consts (SOURCE_TYPES /
+// RUN_OUTCOMES & co.) are declared mid-module and throw a TDZ ReferenceError if
+// touched during evaluation. Deliberately OUTSIDE the JOBHUNT_TEST guard - the
+// seed is data, not a socket, and the demo-mode integration suite boots exactly
+// this path. refDate anchors the seed's relative dates to TODAY (deadlines
+// ahead, applied/run history recent) while staying deterministic per calendar
+// day - see demo/seed.mjs (SIM-390 item 5).
+if (DEMO_MODE) {
+  try {
+    if (store.listJobs().length === 0) {
+      applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() }));
+      console.log("[jobhunt] demo: seeded fictional dataset on boot");
+    }
+  } catch (e) {
+    console.error(`[jobhunt] demo seed on boot failed (non-fatal): ${e && e.message ? e.message : e}`);
+  }
+}
+
 // Skip the watcher + port bind when imported by tests (JOBHUNT_TEST=1).
 if (process.env.JOBHUNT_TEST !== "1") {
   // Boot-time orphaned-run reconcile (SIM-70), BEFORE any run can be accepted.
@@ -5669,21 +5747,8 @@ if (process.env.JOBHUNT_TEST !== "1") {
     console.error(`[jobhunt] boot reconcile failed (non-fatal): ${e && e.message ? e.message : e}`);
   }
 
-  // Seed a fresh demo DB on boot if it is empty (idempotent-ish: applySeed skips
-  // colliding job slugs), so a just-provisioned demo instance comes up populated.
-  // Runs HERE, after full module evaluation, never at the store-boot site above:
-  // applySeed goes through normalizeSource, whose enum consts (SOURCE_TYPES & co.)
-  // are declared mid-module and throw a TDZ ReferenceError if touched at boot.
-  if (DEMO_MODE) {
-    try {
-      if (store.listJobs().length === 0) {
-        applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() }));
-        console.log("[jobhunt] demo: seeded fictional dataset on boot");
-      }
-    } catch (e) {
-      console.error(`[jobhunt] demo seed on boot failed (non-fatal): ${e && e.message ? e.message : e}`);
-    }
-  }
+  // (The empty-DB demo boot seed moved ABOVE this JOBHUNT_TEST guard - it is
+  // data, not a socket, and the demo-mode integration suite boots that path.)
 
   // Demo nightly reset via an in-process interval (design 5.3 / MF-10): no endpoint
   // needed, no anonymous surface. DEMO_RESET_INTERVAL_MS (e.g. 86400000 for daily)
@@ -5753,4 +5818,7 @@ if (process.env.JOBHUNT_TEST !== "1") {
 // the EXACT table startRun consumes - every scope:"job"/"global" product routine
 // must declare an `agent` that resolves to a real docs/agents.yaml id. Exporting
 // the runtime object (not a copy) means the guard can never drift from what runs.
-export { app, ROUTINES };
+// `store` rides along for the pg-backed integration suites (demo-mode.test.js),
+// which must close the store's worker connection BEFORE stopping their embedded
+// cluster or the dying socket surfaces as an unhandled error in teardown.
+export { app, ROUTINES, store };

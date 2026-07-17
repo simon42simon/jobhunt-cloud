@@ -3,6 +3,7 @@ import { api } from "./api";
 import { useJobs } from "./hooks/useJobs";
 import { useTasks } from "./hooks/useTasks";
 import { useDiscoverySources } from "./hooks/useDiscoverySources";
+import { setStreamAvailability } from "./hooks/useEventStream";
 import { countDueSources } from "./lib/sources";
 import type { AppConfig, Status } from "./types";
 import { TopBar, type JobsViewMode, type ViewMode } from "./components/TopBar";
@@ -358,7 +359,19 @@ export default function App() {
   }
 
   useEffect(() => {
-    api.getConfig().then(setConfig).catch(() => {});
+    // The config answer also resolves the SSE capability gate (SIM-390 item 3):
+    // the shared EventSource stays DEFERRED until the server states whether
+    // /api/stream exists on this instance (`sse: false` on the pg-backed cloud,
+    // where the request would only 503 and burn a reconnect loop). An older
+    // server that omits the field, or a failed config fetch, fails OPEN to the
+    // historical connect-immediately behavior.
+    api
+      .getConfig()
+      .then((cfg) => {
+        setConfig(cfg);
+        setStreamAvailability(cfg.sse !== false);
+      })
+      .catch(() => setStreamAvailability(true));
   }, []);
 
   // Global keyboard shortcuts.
