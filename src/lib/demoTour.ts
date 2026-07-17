@@ -87,13 +87,18 @@ function attr(value: string): string {
 // The live element a beat's spotlight anchors to, as a querySelector string.
 // The data-demo-* attributes are tiny additions on the REAL components
 // (KanbanBoard's column scroller, JobCard's root, JobDetail's files section and
-// pipeline action rows) - the tour points at what is already on screen (U1),
-// it never renders a copy. Beats 2 and 3 re-anchor when the hero's drawer is
-// open (selectedJob), moving from the card to the thing inside the drawer.
+// pipeline action rows, App's expanded-run stack) - the tour points at what is
+// already on screen (U1), it never renders a copy. Beats 2 and 3 re-anchor when
+// the hero's drawer is open (selectedJob), moving from the card to the thing
+// inside the drawer; beat 3 re-anchors AGAIN when the invited click opens the
+// run panel (SIM-390 item 1: the z-70 panel used to open OVER the action-row
+// callout and bury its "Finish tour" control - the panel IS the spectacle the
+// beat narrates, so the callout follows it and stays clickable).
 export function anchorSelector(
   step: TourStep,
   heroes: TourHeroes,
   selectedJob: string | null,
+  runPanelOpen = false,
 ): string | null {
   switch (step) {
     case "beat1":
@@ -105,6 +110,7 @@ export function anchorSelector(
         : `[data-demo-job=${attr(heroes.heroA.id)}]`;
     case "beat3":
       if (!heroes.heroB) return null;
+      if (runPanelOpen) return '[data-demo-anchor="run-panel"]';
       return selectedJob === heroes.heroB.job.id
         ? `[data-demo-anchor=${attr(`${heroes.heroB.action}-action`)}]`
         : `[data-demo-job=${attr(heroes.heroB.job.id)}]`;
@@ -129,6 +135,7 @@ export function calloutFor(
   step: "beat1" | "beat2" | "beat3",
   heroes: TourHeroes,
   selectedJob: string | null,
+  runPanelOpen = false,
 ): Callout {
   if (step === "beat1") {
     return {
@@ -152,6 +159,16 @@ export function calloutFor(
   const action = heroes.heroB?.action ?? "draft";
   const open = !!heroes.heroB && selectedJob === heroes.heroB.job.id;
   const button = action === "draft" ? "Draft CV + cover letter" : "Finalize (after gaps)";
+  // Once the invited click has opened the run panel, the invite line is stale -
+  // narrate the panel the callout is now anchored to (SIM-390 item 1).
+  if (runPanelOpen) {
+    return {
+      tag: "TOUR · 3/3",
+      title: "The agent",
+      body: "This panel is the agent working - stages, live activity, cost. Replayed from a real run; it keeps going after you finish the tour.",
+      next: "Finish tour",
+    };
+  }
   return {
     tag: "TOUR · 3/3",
     title: "The agent",

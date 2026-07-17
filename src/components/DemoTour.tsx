@@ -124,11 +124,27 @@ const CALLOUT_W = 300;
 // top-left for a viewport-scale anchor (beat 1's whole board). No anchor found
 // (hero filtered off the board) degrades to a fixed top-center card - the copy
 // still reads, nothing breaks.
-function calloutStyle(rect: Rect | null): React.CSSProperties {
+//
+// place:"beside" is beat 3's run-panel re-anchor (SIM-390 item 1): the panel is
+// a TALL card hugging the right edge at z-70 (above this callout's z-60), so
+// the generic branches would tuck the callout INSIDE its top-left and the panel
+// would paint over "Finish tour". Instead it sits to the panel's LEFT when the
+// viewport has room, above it otherwise, and - the last resort on a phone,
+// where the 92vw panel leaves no clear ground - overlays the panel's top-left
+// corner LIFTED over the panel's z-index, so the buttons stay clickable in
+// every geometry.
+function calloutStyle(rect: Rect | null, place: "auto" | "beside" = "auto"): React.CSSProperties {
   if (!rect) return { top: 96, left: "50%", transform: "translateX(-50%)" };
   const vw = window.innerWidth;
   const vh = window.innerHeight;
   const clampLeft = (l: number) => Math.min(Math.max(l, 8), Math.max(8, vw - CALLOUT_W - 8));
+  if (place === "beside") {
+    const top = Math.min(Math.max(rect.top, 8), Math.max(8, vh - 220));
+    if (rect.left >= CALLOUT_W + 16) return { top, left: rect.left - CALLOUT_W - 10, zIndex: 80 };
+    if (rect.top >= 240)
+      return { top: rect.top - 10, left: clampLeft(rect.left), transform: "translateY(-100%)", zIndex: 80 };
+    return { top: rect.top + 12, left: clampLeft(rect.left + 12), zIndex: 80 };
+  }
   if (rect.height > vh * 0.5) return { top: rect.top + 16, left: clampLeft(rect.left + 16) };
   if (rect.top + rect.height + 220 < vh)
     return { top: rect.top + rect.height + 10, left: clampLeft(rect.left) };
@@ -148,6 +164,7 @@ export function DemoTour({
   jobs,
   selectedJob,
   replaySignal,
+  runPanelOpen,
   onEnsureBoard,
   onCloseDrawer,
 }: {
@@ -156,6 +173,10 @@ export function DemoTour({
   // Bumped by the banner's "Replay tour" (U1: re-launchable on demand, even
   // after a dismissal). App forces the Jobs board view before bumping.
   replaySignal: number;
+  // True while App's expanded-run stack is mounted (SIM-390 item 1): beat 3
+  // re-anchors onto the run panel the invited click just opened, instead of
+  // staying under it with "Finish tour" buried beneath the z-70 panel.
+  runPanelOpen: boolean;
   // Called when the tour starts from its own buttons, so beat 1's anchor (the
   // board) is actually on screen even if the visitor wandered to another view.
   onEnsureBoard: () => void;
@@ -213,7 +234,7 @@ export function DemoTour({
 
   // Hooks above any early return. The selector is null outside the 3 beats.
   const isBeat = step === "beat1" || step === "beat2" || step === "beat3";
-  const selector = isBeat && step ? anchorSelector(step, heroes, selectedJob) : null;
+  const selector = isBeat && step ? anchorSelector(step, heroes, selectedJob, runPanelOpen) : null;
   const rect = useAnchorRect(selector);
 
   // Nothing to point at until the board has jobs (the cold open paints the
@@ -316,7 +337,8 @@ export function DemoTour({
 
   // One of the 3 beats: quiet accent ring around the live anchor (U5 - a
   // highlight state on the existing token, not a new visual) + a small card.
-  const callout = calloutFor(step, heroes, selectedJob);
+  const callout = calloutFor(step, heroes, selectedJob, runPanelOpen);
+  const anchoredToRunPanel = step === "beat3" && runPanelOpen;
   return (
     <>
       {rect && (
@@ -334,7 +356,7 @@ export function DemoTour({
       <section
         aria-label={callout.tag}
         className="fixed z-[60] w-[min(300px,calc(100vw-2rem))] rounded-lg border border-[var(--color-edge)] bg-[var(--color-panel)] p-3 shadow-2xl"
-        style={calloutStyle(rect)}
+        style={calloutStyle(rect, anchoredToRunPanel ? "beside" : "auto")}
       >
         <span className={monoTag}>{callout.tag}</span>
         <div className="mt-1 text-[13px] font-semibold text-[var(--color-text)]">

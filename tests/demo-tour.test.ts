@@ -156,6 +156,19 @@ describe("anchorSelector (points at LIVE elements, re-anchoring when the drawer 
     expect(anchorSelector("beat2", { heroA: null, heroB: null }, null)).toBeNull();
     expect(anchorSelector("beat3", { heroA: null, heroB: null }, null)).toBeNull();
   });
+
+  // SIM-390 item 1: the run panel opens at z-70 OVER the action-row callout,
+  // burying "Finish tour". Beat 3 re-anchors onto the panel itself.
+  it("beat 3 re-anchors onto the run panel once the invited click opened it", () => {
+    expect(anchorSelector("beat3", heroes, heroB.id, true)).toBe('[data-demo-anchor="run-panel"]');
+    // Drawer closed mid-run: still the panel (it is what the beat narrates).
+    expect(anchorSelector("beat3", heroes, null, true)).toBe('[data-demo-anchor="run-panel"]');
+  });
+
+  it("an open run panel never re-anchors beats 1/2 (a background run must not hijack them)", () => {
+    expect(anchorSelector("beat1", heroes, null, true)).toBe('[data-demo-anchor="board"]');
+    expect(anchorSelector("beat2", heroes, heroA.id, true)).toBe('[data-demo-anchor="materials"]');
+  });
 });
 
 // --- calloutFor (the scripted copy) ----------------------------------------------
@@ -189,6 +202,14 @@ describe("calloutFor", () => {
     const fin: TourHeroes = { heroA, heroB: { job: heroB, action: "finalize" } };
     expect(calloutFor("beat3", fin, heroB.id).body).toContain("Finalize (after gaps)");
     expect(calloutFor("beat3", fin, heroB.id).next).toBe("Finish tour");
+  });
+
+  it("beat 3 drops the stale invite once the run panel is open, and Finish tour stays the exit (SIM-390 item 1)", () => {
+    const c = calloutFor("beat3", heroes, heroB.id, true);
+    expect(c.tag).toBe("TOUR · 3/3");
+    expect(c.body).not.toContain("Click"); // the invited click already happened
+    expect(c.body).toContain("stages, live activity, cost");
+    expect(c.next).toBe("Finish tour");
   });
 });
 
@@ -268,5 +289,25 @@ describe("demo chrome wiring contracts", () => {
     expect(tour).not.toContain("setInterval");
     expect(tour).not.toContain("requestAnimationFrame");
     expect(tour).toContain("MutationObserver");
+  });
+
+  // --- SIM-390 item 1 (the run panel buried "Finish tour") --------------------
+  // The pure re-anchor logic is unit-tested above; these pin the WIRING (this
+  // project has no jsdom - the live overlap geometry is verified by the manual
+  // QA walk: beat 3, click the action button, confirm "Finish tour" clickable
+  // while the replay animates).
+
+  it("item 1 wiring: the expanded-run stack is an anchor, and App feeds its state to the tour", () => {
+    expect(app).toContain('data-demo-anchor="run-panel"');
+    expect(app).toMatch(/runPanelOpen=\{expandedRuns\(runs\)\.length > 0\}/);
+  });
+
+  it("item 1 wiring: the run-panel anchor gets the 'beside' placement, lifted over the panel's z-70", () => {
+    // The re-anchored callout must never sit UNDER the z-70 panel: the beside
+    // branch places it left/above, and every branch carries zIndex 80 so even
+    // the clamped phone geometry leaves the buttons clickable.
+    expect(tour).toMatch(/anchoredToRunPanel \? "beside" : "auto"/);
+    const beside = /if \(place === "beside"\) \{([\s\S]*?)\n  \}/.exec(tour)?.[1] || "";
+    expect(beside.match(/zIndex: 80/g)?.length).toBe(3);
   });
 });

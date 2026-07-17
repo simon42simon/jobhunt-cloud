@@ -587,6 +587,7 @@ export default function App() {
           scrolls if many panels are open at once. */}
       {expandedRuns(runs).length > 0 && (
         <div
+          data-demo-anchor="run-panel"
           className={`fixed right-4 z-[70] flex max-h-[calc(100vh-5rem)] w-[min(560px,92vw)] flex-col justify-end gap-3 overflow-y-auto ${
             minimizedRuns(runs).length > 0 ? "bottom-16" : "bottom-4"
           }`}
@@ -689,6 +690,7 @@ export default function App() {
             jobs={jobs}
             selectedJob={selectedJob}
             replaySignal={tourReplays}
+            runPanelOpen={expandedRuns(runs).length > 0}
             onEnsureBoard={ensureBoardForTour}
             onCloseDrawer={closeJob}
           />
