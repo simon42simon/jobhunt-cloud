@@ -82,7 +82,11 @@ describe("computeProjectTaskConsistency (live portfolio.yaml + tasks.yaml)", () 
   const portfolio = yaml.load(fs.readFileSync(path.join(docs, "portfolio.yaml"), "utf8")) || {};
   // ADR-023: portfolio.yaml stays a tracked ledger in docs/; the live tasks moved
   // to the data zone (env > config dataDir > docs).
-  const tasks = (yaml.load(fs.readFileSync(path.join(resolveDataDir(path.join(here, "..")), "tasks.yaml"), "utf8")) || {}).tasks || [];
+  // Clean-repo hermeticity (I9): the live board lives in the data zone, which the
+  // public extraction deliberately does not carry - skip there, never fail.
+  const tasksPath = path.join(resolveDataDir(path.join(here, "..")), "tasks.yaml");
+  const live = fs.existsSync(tasksPath);
+  const tasks = live ? (yaml.load(fs.readFileSync(tasksPath, "utf8")) || {}).tasks || [] : [];
   const out = computeProjectTaskConsistency(portfolio, tasks);
 
   // Owner-visible baseline: shrink this list as tickets are backfilled/linked.
@@ -93,13 +97,13 @@ describe("computeProjectTaskConsistency (live portfolio.yaml + tasks.yaml)", () 
     "prj-ops-management-mvp",
   ];
 
-  it("has NO route breakage (dangling/orphan refs) and NO incomplete-done projects", () => {
+  it.skipIf(!live)("has NO route breakage (dangling/orphan refs) and NO incomplete-done projects", () => {
     const routeKinds = new Set(["dangling-project-ref", "dangling-milestone-ref", "orphan-milestone", "done-project-incomplete-tasks"]);
     const offenders = out.findings.filter((f) => routeKinds.has(f.kind)).map((f) => `${f.kind}: ${f.message}`);
     expect(offenders).toEqual([]);
   });
 
-  it("has no NEW 'done project with zero linked tasks' beyond the documented legacy baseline", () => {
+  it.skipIf(!live)("has no NEW 'done project with zero linked tasks' beyond the documented legacy baseline", () => {
     const noTasks = out.findings.filter((f) => f.kind === "done-project-no-tasks").map((f) => f.projectId).sort();
     expect(noTasks).toEqual([...KNOWN_LEGACY_UNLINKED].sort());
   });

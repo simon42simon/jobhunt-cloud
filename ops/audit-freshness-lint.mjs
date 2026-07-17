@@ -104,6 +104,15 @@ function main(argv) {
       currentVersion = "";
     }
   }
+  // Clean-repo hermeticity (I9): the governance audit ledger is deliberately
+  // absent from the public extraction (docs/audits/ is not carried at all).
+  // An ABSENT directory is that posture and passes with a note; a PRESENT but
+  // empty/stale ledger is the real drift this lint exists to catch and fails.
+  if (!fs.existsSync(auditsDir)) {
+    console.log(`[audit-freshness-lint] ${auditsDir} vs v${currentVersion}`);
+    console.log("  PASS - docs/audits/ absent (clean public extraction carries no audit ledger); the private repo enforces freshness");
+    process.exit(0);
+  }
   let audits = [];
   try {
     audits = fs
@@ -111,7 +120,7 @@ function main(argv) {
       .filter((f) => f.endsWith(".md"))
       .map((f) => ({ name: f, content: fs.readFileSync(path.join(auditsDir, f), "utf8") }));
   } catch {
-    /* missing dir -> audits stays [] -> fails with the no-audit detail */
+    /* unreadable dir -> audits stays [] -> fails with the no-audit detail */
   }
   const { ok, detail } = lintAuditFreshness(audits, currentVersion);
   console.log(`[audit-freshness-lint] ${auditsDir} vs v${currentVersion}`);

@@ -190,7 +190,9 @@ describe("version-skew passthrough (_extra): unmodeled keys survive the round-tr
   });
 });
 
-describe("committed registry guard: no key in the real data is droppable", () => {
+// Clean-repo hermeticity (I9): the curated registry is deliberately absent from
+// the public extraction - skip the committed-content guard there, never fail.
+describe.skipIf(!fs.existsSync(path.join(REPO_DOCS, "discovery-sources.yaml")))("committed registry guard: no key in the real data is droppable", () => {
   it("every key on every source in docs/discovery-sources.yaml survives a round-trip", () => {
     const committed = yaml.load(fs.readFileSync(path.join(REPO_DOCS, "discovery-sources.yaml"), "utf8"));
     expect(committed.sources.length).toBeGreaterThan(0);

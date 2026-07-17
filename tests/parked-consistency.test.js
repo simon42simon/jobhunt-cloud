@@ -67,8 +67,11 @@ describe("computeParkedConsistency (live tasks.yaml in the data zone)", () => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   // ADR-023: the live board left docs/ for the data zone (env > config dataDir > docs).
   const tasksPath = path.join(resolveDataDir(path.join(here, "..")), "tasks.yaml");
+  // Clean-repo hermeticity (I9): the live board lives in the data zone, which the
+  // public extraction deliberately does not carry - skip there, never fail.
+  const live = fs.existsSync(tasksPath);
 
-  it("the live task board has zero parked-label drift", () => {
+  it.skipIf(!live)("the live task board has zero parked-label drift", () => {
     const data = yaml.load(fs.readFileSync(tasksPath, "utf8")) || {};
     const out = computeParkedConsistency(data.tasks || []);
     // A failure prints exactly which ticket drifted and how to fix it.

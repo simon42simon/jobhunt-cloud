@@ -415,7 +415,9 @@ describe("finalizeRunRecord (pure)", () => {
 // Migration seed correctness - the COMMITTED docs/discovery-sources.yaml joins
 // the real legacy Source strings through its curated aliases.
 // ---------------------------------------------------------------------------
-describe("migration seed (committed discovery-sources.yaml) alias join", () => {
+// Clean-repo hermeticity (I9): the curated registry is deliberately absent from
+// the public extraction - skip the committed-seed suite there, never fail.
+describe.skipIf(!fs.existsSync(path.join(REPO_DOCS, "discovery-sources.yaml")))("migration seed (committed discovery-sources.yaml) alias join", () => {
   beforeEach(() => {
     restoreDocs(); // use the real committed seed, not a fixture
     setFinds([

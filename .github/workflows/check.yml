@@ -20,6 +20,10 @@ jobs:
           node-version: "20"
           cache: npm
       - run: npm ci
+      # The repo ships config.example.json only (config.json is local/gitignored);
+      # tests boot the server module, which requires one - provision the example,
+      # exactly as the Dockerfile does for the runtime image.
+      - run: cp config.example.json config.json
       # Secret-scan gate dependency: npm run check invokes gitleaks (lint:secrets),
       # which is not preinstalled on GitHub runners. Pinned to the version the
       # local gate was proven against.

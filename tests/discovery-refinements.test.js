@@ -390,7 +390,10 @@ describe("Source fetchMode + fetchNote", () => {
     expect(prompt).not.toContain("Fetch note");
   });
 
-  it("MIGRATION GUARD: the committed registry's fetchMode values are all valid, and University Affairs carries the field-run's mode + note", () => {
+  // Clean-repo hermeticity (I9): the curated registry is deliberately absent from
+  // the public extraction - skip the committed-content guard there, never fail.
+  const committedRegistry = fs.existsSync(path.join(REPO_DOCS, "discovery-sources.yaml"));
+  it.skipIf(!committedRegistry)("MIGRATION GUARD: the committed registry's fetchMode values are all valid, and University Affairs carries the field-run's mode + note", () => {
     const committed = yaml.load(fs.readFileSync(path.join(REPO_DOCS, "discovery-sources.yaml"), "utf8"));
     const withMode = committed.sources.filter((s) => s.fetchMode !== undefined);
     expect(withMode.length).toBeGreaterThanOrEqual(30); // the unambiguous majority migrated

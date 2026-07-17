@@ -4,6 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// Clean-repo hermeticity (I9): the curated docs/ taxonomy (governance, briefs/,
+// routines/, enablement-reviews/) is deliberately absent from the public
+// extraction - the suites asserting on that real content skip there, never fail.
+const CURATED_DOCS = fs.existsSync(new URL("../docs/briefs", import.meta.url));
+
 // Spin the real Express app over a throwaway fixture vault (JOBHUNT_TEST skips
 // the watcher + port bind; JOBHUNT_JOBS_DIR points it at the fixture).
 let app;
@@ -584,7 +589,7 @@ describe("GET /api/portfolio", () => {
 // override in this file - because the point of the backward-compat and
 // "known doc" assertions is the actual committed doc set, same as the
 // agents/portfolio tests above. Never writes, so this is safe over the real dir.
-describe("GET /api/docs", () => {
+describe.skipIf(!CURATED_DOCS)("GET /api/docs", () => {
   it("returns 200 with a { name, title, group } array including a top-level and a briefs/ doc", async () => {
     const res = await request(app).get("/api/docs");
 
@@ -670,7 +675,7 @@ describe("GET /api/docs", () => {
 // path-safety rejection here must be verified NOT to have read anything
 // outside docs/ - the assertions check status, never file content, for the
 // rejected cases.
-describe("GET /api/doc/*", () => {
+describe.skipIf(!CURATED_DOCS)("GET /api/doc/*", () => {
   it("serves a top-level doc by name", async () => {
     const res = await request(app).get("/api/doc/governance");
 
@@ -881,7 +886,7 @@ describe("GET /api/docs and GET /api/doc/* - frontmatter meta (hermetic fixture)
 // least one dated weekly review committed there). Deliberately does NOT pin
 // the dated filename - that breaks every week a new review lands - it asserts
 // the general rule instead, so it stays true regardless of which files exist.
-describe("GET /api/docs - real enablement-reviews/ docs (robust invariant)", () => {
+describe.skipIf(!CURATED_DOCS)("GET /api/docs - real enablement-reviews/ docs (robust invariant)", () => {
   it("gives every doc whose name starts with 'enablement-reviews/' the group 'Reviews & Logs'", async () => {
     const res = await request(app).get("/api/docs");
 

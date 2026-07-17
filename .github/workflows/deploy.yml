@@ -24,6 +24,9 @@ jobs:
       packages: write
     env:
       IMAGE: ghcr.io/${{ github.repository }}
+      # Job-level env indirection: the `secrets` context is not available in a
+      # step-level `if` (GitHub rejects the whole workflow file), but `env` is.
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
       - name: Checkout app
         uses: actions/checkout@v4
@@ -49,9 +52,7 @@ jobs:
 
       # ---- STAGED Railway deploy (runs only when RAILWAY_TOKEN is configured) ----
       - name: Deploy to Railway
-        if: ${{ secrets.RAILWAY_TOKEN != '' }}
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        if: ${{ env.RAILWAY_TOKEN != '' }}
         run: |
           echo "Deploying ${{ env.IMAGE }}:${{ github.ref_name }} to Railway"
           npm i -g @railway/cli
