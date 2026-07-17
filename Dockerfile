@@ -46,7 +46,7 @@ COPY --chown=app:app --from=builder /app/dist ./dist
 COPY --chown=app:app server ./server
 COPY --chown=app:app demo ./demo
 COPY --chown=app:app migrations ./migrations
-COPY --chown=app:app ops/migrate.mjs ops/reconcile-core.mjs ./ops/
+COPY --chown=app:app ops/migrate.mjs ops/reconcile-core.mjs ops/activity-log-lint.mjs ./ops/
 COPY --chown=app:app docs ./docs
 COPY --chown=app:app package.json ./package.json
 # Ship the PLACEHOLDER config as config.json - never the owner's real vault path.
