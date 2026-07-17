@@ -396,7 +396,7 @@ app.get("/healthz", (req, res) => {
 function resetDemoData() {
   if (typeof store.resetAll !== "function") return;
   store.resetAll();
-  applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1));
+  applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() }));
 }
 // NO anonymous reset surface (MF-10): the endpoint is registered ONLY in demo mode
 // AND only when a reset secret is configured, and it requires that secret
@@ -5427,7 +5427,7 @@ if (process.env.JOBHUNT_TEST !== "1") {
   if (DEMO_MODE) {
     try {
       if (store.listJobs().length === 0) {
-        applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1));
+        applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() }));
         console.log("[jobhunt] demo: seeded fictional dataset on boot");
       }
     } catch (e) {

@@ -58,6 +58,22 @@ describe("demo seed determinism", () => {
     for (const j of ds.jobs.filter((x) => ["lead", "queued"].includes(x.status))) {
       expect(j.deadline > "2098-12-31", `deadline ${j.deadline} on ${j.id}`).toBe(true);
     }
+  });
+
+  it("refDate anchors lead/queued deadlines 1-5 weeks ahead (sane 'due in Nd' chips, BUG-4), deterministically per day", () => {
+    const ref = new Date("2026-07-16T23:45:00Z");
+    const a = generate(1, { refDate: ref });
+    const lo = "2026-07-23", hi = "2026-08-20";
+    for (const j of a.jobs.filter((x) => ["lead", "queued"].includes(x.status))) {
+      expect(j.deadline >= lo && j.deadline <= hi, `deadline ${j.deadline} on ${j.id}`).toBe(true);
+    }
+    // Same calendar day, different wall-clock time -> byte-identical dataset.
+    const b = generate(1, { refDate: new Date("2026-07-16T01:02:03Z") });
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+
+  it("Hero A/B contracts hold: full artifact set + multi-run history on interview; queued and drafted heroes exist", () => {
+    const ds = generate(1);
     // Hero A (an interview job) carries the complete artifact set + a multi-run history.
     const heroA = ds.jobs.find((j) => j.status === "interview");
     expect(heroA.artifacts.length).toBeGreaterThanOrEqual(2);

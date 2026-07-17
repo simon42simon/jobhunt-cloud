@@ -76,7 +76,19 @@ const dateStamp = (daysAgo) => dayISO(daysAgo).slice(0, 10);
 
 // ---- dataset generator ------------------------------------------------------
 // Returns a plain, deterministic domain dataset. `seedVersion` (int) pins the RNG.
-export function generate(seedVersion = 1) {
+// `refDate` (optional Date) anchors the lead/queued deadlines 1-5 weeks AHEAD of
+// it, so the board reads "due in 12d" instead of "26805d left" (QA BUG-4) while
+// staying deterministic: the date is truncated to its UTC day, so every seed/reset
+// on the same calendar day is byte-identical, and the nightly reset re-seeds with
+// a fresh day before any deadline can lapse into the auto-close sweep. Without
+// refDate the deadlines fall back to fixed far-future dates (the hermetic-test
+// posture - fully version-pinned, no wall-clock input at all).
+export function generate(seedVersion = 1, { refDate } = {}) {
+  const refDay = refDate ? Date.UTC(refDate.getUTCFullYear(), refDate.getUTCMonth(), refDate.getUTCDate()) : null;
+  const deadlineFor = (i) =>
+    refDay
+      ? new Date(refDay + (7 + (i % 5) * 7) * 86400000).toISOString().slice(0, 10)
+      : `2099-12-${String(1 + (i % 28)).padStart(2, "0")}`;
   const rng = mulberry32(1000 + Number(seedVersion || 1));
 
   // Expand the funnel into a flat, deterministic status list (23 jobs).
@@ -130,9 +142,17 @@ export function generate(seedVersion = 1) {
           `I am excited to apply for the ${role} role. This letter is fictional demo content.\n\n` +
           `Sincerely,\n${person}\n`,
       });
+      // Realistic-reading (still fully fictional) gap Q&A - Beat 2 of the demo
+      // tour narrates this page, so literal filler undercuts AC5's "none reads
+      // as placeholder" (QA low-severity note).
       notes.push({
         name: "gaps.md",
-        content: `# Gaps\n\n- Q: A sample interview gap for ${role}?\n- A: A fictional demo answer.\n`,
+        content:
+          `# Gaps\n\n` +
+          `- Q: The posting asks for direct budget ownership; the CV shows shared program budgets only.\n` +
+          `- A: Owned the tooling line (~$120k) inside a shared program budget and ran its quarterly re-forecast solo - fictional example written for this demo.\n\n` +
+          `- Q: The ${role} posting names a certification the CV does not carry.\n` +
+          `- A: Equivalent coursework completed in 2025; certification exam scheduled - fictional demo answer, no real credential implied.\n`,
       });
       notes.push({
         name: "job-description.md",
@@ -147,11 +167,9 @@ export function generate(seedVersion = 1) {
       fit,
       status,
       sector,
-      // Far-future ON PURPOSE (deterministic, never expires): a lead/queued job
-      // with a passed deadline is auto-closed by the lazy sweep on the first
-      // GET /api/jobs, which silently ate the top of the funnel when these were
-      // stamped relative to the fixed ANCHOR (the demo degraded as days passed).
-      deadline: status === "lead" || status === "queued" ? `2099-12-${String(1 + (i % 28)).padStart(2, "0")}` : null,
+      // Always AHEAD of refDate (or far-future without one) so the lazy auto-close
+      // sweep can never eat the top of the funnel; see deadlineFor above (BUG-4).
+      deadline: status === "lead" || status === "queued" ? deadlineFor(i) : null,
       link: `https://demo.example.test/postings/${i + 1}`,
       source: "demo-seed",
       applied,
