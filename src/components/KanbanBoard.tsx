@@ -174,7 +174,13 @@ export function KanbanBoard({
           </button>
         </div>
         <div className="relative min-h-0 flex-1">
-          <div ref={scrollerRef} className="flex h-full gap-3 overflow-x-auto px-5 pb-5">
+          {/* data-demo-anchor: beat 1 of the demo tour spotlights the whole
+              board (src/lib/demoTour.ts). Inert outside demo mode. */}
+          <div
+            ref={scrollerRef}
+            data-demo-anchor="board"
+            className="flex h-full gap-3 overflow-x-auto px-5 pb-5"
+          >
             {visibleStatuses.map((status) => (
               <Column
                 key={status}

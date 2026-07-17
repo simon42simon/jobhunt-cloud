@@ -45,6 +45,9 @@ export function JobCard({ job, onOpen }: { job: Job; onOpen: (id: string) => voi
         }
       }}
       aria-label={`${job.role} at ${job.employer}`}
+      // data-demo-job: the demo tour's hero-card anchor (src/lib/demoTour.ts) -
+      // a stable hook the id-based selector can find. Inert outside demo mode.
+      data-demo-job={job.id}
       className="group cursor-grab rounded-lg border border-[var(--color-edge)] border-l-[3px] bg-[var(--color-panel-2)] p-3 transition hover:border-[#33405f] hover:bg-[#19223399] active:cursor-grabbing"
     >
       <div className="mb-1 flex items-start justify-between gap-2">

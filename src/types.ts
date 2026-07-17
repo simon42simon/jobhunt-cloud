@@ -116,6 +116,11 @@ export interface AppConfig {
   statuses: Status[];
   tracks: Record<string, string>;
   weeklyTarget: number;
+  // Server-declared runtime mode (RC-4 / SIM-88, server/app-mode.js): "demo" is
+  // the public seeded instance (canned replays, nightly reset) and the ONLY
+  // value that renders the demo chrome (DemoBanner + DemoTour). "real" - or
+  // absent, tolerated for older payloads - means zero demo UI.
+  appMode?: "demo" | "real";
 }
 
 export type PhaseStatus = "shipped" | "in_progress" | "planned" | "later";

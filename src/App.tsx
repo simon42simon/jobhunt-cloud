@@ -21,6 +21,8 @@ import { NeedsAttentionStrip } from "./components/NeedsAttentionStrip";
 import { JobPresets } from "./components/JobPresets";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ChatCapture } from "./components/ChatCapture";
+import { DemoBanner } from "./components/DemoBanner";
+import { DemoTour } from "./components/DemoTour";
 import { ShortcutHelp } from "./components/ShortcutHelp";
 import { UndoToast } from "./components/UndoToast";
 import { STATUS_LABEL } from "./lib/constants";
@@ -229,6 +231,24 @@ export default function App() {
   const [undo, setUndo] = useState<{ jobId: string; role: string; from: Status; to: Status } | null>(null);
   // '?' keyboard cheat-sheet overlay.
   const [shortcutHelp, setShortcutHelp] = useState(false);
+
+  // Demo chrome (RC-4 / SIM-88): ALL of it renders only when the server says
+  // appMode:"demo" (/api/config) - real mode is byte-identical to pre-demo.
+  const demoMode = config?.appMode === "demo";
+  // Bumped by the banner's "Replay tour"; DemoTour restarts at beat 1 on every
+  // bump (U1: the guidance is re-launchable all session, even after dismissal).
+  const [tourReplays, setTourReplays] = useState(0);
+  // Beat 1 anchors the kanban board, so starting the tour forces the Jobs page
+  // into board view first (a no-op on the cold-open default).
+  const ensureBoardForTour = useCallback(() => {
+    clearRoute();
+    setView("jobs");
+    setJobsViewState("board");
+  }, []);
+  const replayTour = useCallback(() => {
+    ensureBoardForTour();
+    setTourReplays((n) => n + 1);
+  }, [ensureBoardForTour]);
 
   async function runRoutine(routine: string, jobId?: string) {
     setRunNote(null);
@@ -459,6 +479,11 @@ export default function App() {
         />
       </ErrorBoundary>
 
+      {/* Demo chrome (RC-4 / SIM-88): the honest banner rides under the TopBar
+          on EVERY view (AC2) and carries the CTA + "Replay tour" so both stay
+          reachable from anywhere (AC7). Demo mode only - never in real mode. */}
+      {demoMode && <DemoBanner onReplayTour={replayTour} />}
+
       <main className="min-h-0 flex-1 pt-4">
         <ErrorBoundary>
           {loading ? (
@@ -611,6 +636,22 @@ export default function App() {
       <ErrorBoundary fallback={null}>
         <ChatCapture onRunStarted={trackRun} onViewTasks={() => switchView("product")} onOpenEntity={openEntity} />
       </ErrorBoundary>
+
+      {/* The demo's guided tour (RC-4 / SIM-88): first-run choice + 3 spotlight
+          beats + close panel, all non-blocking ambient chrome anchored to the
+          live board/drawer. Its own null-fallback boundary (the ChatCapture
+          posture): a tour crash silently removes the tour, never the demo. */}
+      {demoMode && (
+        <ErrorBoundary fallback={null}>
+          <DemoTour
+            jobs={jobs}
+            selectedJob={selectedJob}
+            replaySignal={tourReplays}
+            onEnsureBoard={ensureBoardForTour}
+            onCloseDrawer={closeJob}
+          />
+        </ErrorBoundary>
+      )}
     </div>
   );
 }

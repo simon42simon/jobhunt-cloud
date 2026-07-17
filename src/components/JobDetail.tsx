@@ -726,7 +726,21 @@ export function JobDetailDrawer({
                   const done = !!doneByRoutine[a.routine];
                   const guarded = isRefine || done;
                   return (
-                    <div key={a.routine} className="flex flex-col gap-1">
+                    // data-demo-anchor: beat 3 of the demo tour spotlights the
+                    // Draft (or fallback Finalize) action row (src/lib/demoTour.ts).
+                    // On the row, not the button, so it holds for both the plain
+                    // and the guarded-Regenerate variants. Inert outside demo mode.
+                    <div
+                      key={a.routine}
+                      data-demo-anchor={
+                        a.routine === "first-draft-job"
+                          ? "draft-action"
+                          : a.routine === "finalize-job"
+                            ? "finalize-action"
+                            : undefined
+                      }
+                      className="flex flex-col gap-1"
+                    >
                       <div className="flex items-center gap-2">
                         {done && !isRefine && (
                           <span className="inline-flex shrink-0 items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] font-medium text-emerald-300">
@@ -974,7 +988,13 @@ export function JobDetailDrawer({
                 becomes a link that streams the file to THIS device through the
                 guarded read-only reader (view in browser / download). */}
             {job.files.length > 0 && (
-              <div className="shrink-0 border-b border-[var(--color-edge)] px-5 py-4">
+              // data-demo-anchor: beat 2 of the demo tour narrates this section
+              // once the hero drawer is open (src/lib/demoTour.ts). Inert
+              // outside demo mode.
+              <div
+                data-demo-anchor="materials"
+                className="shrink-0 border-b border-[var(--color-edge)] px-5 py-4"
+              >
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                     Files
