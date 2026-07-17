@@ -217,7 +217,7 @@ async function loadDomainDeps() {
 const STRING_COLS = ["type", "status", "fit", "track", "sector", "tailoring", "link", "next_action"];
 const SCALAR_COLS = ["deadline", "applied", "next_action_date", "source"];
 
-function readJobsDomain(jobsDir) {
+function readJobsDomain(jobsDir, warnings = []) {
   let entries;
   try {
     entries = fs.readdirSync(jobsDir, { withFileTypes: true });
@@ -238,10 +238,15 @@ function readJobsDomain(jobsDir) {
     const files = [];
     for (const it of items) {
       if (!it.isFile()) {
-        fail(
-          `unexpected non-file entry inside job folder "${folder}": "${it.name}". ` +
-            `A nested folder would not be migrated (data loss) - flatten or remove it, then re-run.`,
+        // A nested folder is INVISIBLE to the app on both backends (FileStore's
+        // _listFolderFiles lists direct-child files only), so skipping it keeps
+        // app-view parity exactly - and the source tree stays frozen on disk as
+        // the archive of record, so nothing is lost. Loud, never silent.
+        warnings.push(
+          `job folder "${folder}" contains a nested non-file entry "${it.name}" - SKIPPED ` +
+            `(the app never reads nested folders on either backend; the bytes remain in the frozen file source).`,
         );
+        continue;
       }
       const p = path.join(folderPath, it.name);
       let bytes, stat;
@@ -376,7 +381,7 @@ export function readSourceDataset({ jobsDir, dataDir, docsDir }, log) {
   const ds = { warnings };
 
   // -- jobs + job files
-  ds.jobs = readJobsDomain(jobsDir);
+  ds.jobs = readJobsDomain(jobsDir, warnings);
   log(`[read] jobs: ${ds.jobs.length} folder(s), ${ds.jobs.reduce((n, j) => n + j.files.length, 0)} companion file(s)`);
 
   // -- tasks + board columns
