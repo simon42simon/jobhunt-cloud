@@ -1982,7 +1982,13 @@ function ticketExists(ticketId) {
 // run tracking, GET /api/routines/run/:runId, activity-log, Stop) is scope-
 // agnostic already and needs no change.
 function scopeIdExists(scope, id) {
-  if (scope === "job") return !!store.jobFolderPath(id);
+  // Probe the job DTO first: PgStore has no desktop folder and hard-returns
+  // null from jobFolderPath() (design 2.2), which made every job-scoped run
+  // 404 on the cloud/demo instances - including the demo tour's Beat-3 canned
+  // replay. getJobSummary(id) is null-for-missing on BOTH stores. The folder
+  // fallback preserves the FileStore edge where a job folder exists without a
+  // parseable job file (still a valid --add-dir target for a run).
+  if (scope === "job") return !!(store.getJobSummary(id) || store.jobFolderPath(id));
   if (scope === "ticket") return ticketExists(id);
   return true;
 }

@@ -62,3 +62,18 @@ describe("demo replay drives the run panel", () => {
     expect(r.output.length).toBeGreaterThan(0);
   });
 });
+
+// The run route's job-scope existence check must probe the job DTO, never the
+// desktop folder path: PgStore.jobFolderPath() is null BY DESIGN (cloud has no
+// folder to open), which made every job-scoped run - including the demo tour's
+// Beat-3 replay - 404 on the pg/demo instances. getJobSummary(id) is
+// null-for-missing on BOTH stores, so it is the store-agnostic probe. A source
+// pin (red before the fix landed); the pg HTTP behavior itself is exercised by
+// the differential suite's store contract.
+describe("scopeIdExists is store-agnostic (the Beat-3 404 regression)", () => {
+  it("probes store.getJobSummary, not the FileStore-only jobFolderPath", () => {
+    const src = fs.readFileSync(new URL("../server/index.js", import.meta.url), "utf8");
+    const body = /function scopeIdExists\(scope, id\) \{[\s\S]*?\n\}/.exec(src)?.[0] || "";
+    expect(body).toContain("store.getJobSummary(id) || store.jobFolderPath(id)");
+  });
+});
