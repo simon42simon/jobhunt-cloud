@@ -262,18 +262,10 @@ if (runtime.storeBackend === "pg") {
     deps: { TRACKS, STATUSES, dropInvalidJobEnums, normalizeSource, serializeSource },
   });
   console.log(`[jobhunt] store backend: PgStore (APP_MODE=${runtime.appMode})`);
-  if (DEMO_MODE) {
-    // Seed a fresh demo DB on boot if it is empty (idempotent-ish: applySeed skips
-    // colliding job slugs), so a just-provisioned demo instance comes up populated.
-    try {
-      if (store.listJobs().length === 0) {
-        applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1));
-        console.log("[jobhunt] demo: seeded fictional dataset on boot");
-      }
-    } catch (e) {
-      console.error(`[jobhunt] demo seed on boot failed (non-fatal): ${e && e.message ? e.message : e}`);
-    }
-  }
+  // NOTE: the empty-DB demo seed does NOT run here. applySeed exercises
+  // normalizeSource, whose enum consts (SOURCE_TYPES & co.) are declared
+  // mid-module and are still TDZ at this point of module evaluation - seeding
+  // happens in the boot block at the bottom, after the module fully evaluates.
 } else {
   store = resolveStore(process.env, {
     jobsDir: JOBS_DIR,
@@ -5419,6 +5411,22 @@ if (process.env.JOBHUNT_TEST !== "1") {
     }
   } catch (e) {
     console.error(`[jobhunt] boot reconcile failed (non-fatal): ${e && e.message ? e.message : e}`);
+  }
+
+  // Seed a fresh demo DB on boot if it is empty (idempotent-ish: applySeed skips
+  // colliding job slugs), so a just-provisioned demo instance comes up populated.
+  // Runs HERE, after full module evaluation, never at the store-boot site above:
+  // applySeed goes through normalizeSource, whose enum consts (SOURCE_TYPES & co.)
+  // are declared mid-module and throw a TDZ ReferenceError if touched at boot.
+  if (DEMO_MODE) {
+    try {
+      if (store.listJobs().length === 0) {
+        applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1));
+        console.log("[jobhunt] demo: seeded fictional dataset on boot");
+      }
+    } catch (e) {
+      console.error(`[jobhunt] demo seed on boot failed (non-fatal): ${e && e.message ? e.message : e}`);
+    }
   }
 
   // Demo nightly reset via an in-process interval (design 5.3 / MF-10): no endpoint
