@@ -8,7 +8,12 @@ Every shippable change gets an entry. Categories: **Added**, **Changed**, **Secu
 
 ## [Unreleased]
 
-_Nothing awaiting a version cut._
+### Added
+- **Failed-login visibility (SIM-386).** With auth on, every failed login (bad passphrase and rate-limited 429s) is recorded to stdout and as a durable `kind:"auth"` activity-log line (field-whitelisted — never credential material), with a once-per-window threshold bell notification and a session-gated `GET /api/auth/failed-logins`. Durable writes are bounded per the guardian condition (cap 20 lines + 1 alert per window; the in-memory count stays exact; stdout sampled beyond the cap). Auth-off deployments are byte-identical no-ops.
+- **Vault→cloud sync ingest surface, shipped DORMANT (SIM-393 I1).** `/api/sync/*` bearer-token lane (separate least-privilege token, verify-only sha256 hash server-side), insert-only store semantics on both backends, shared `server/name-safety.js` validator, migration `0003_job_files_sha256` (ordering fixed: ALTER via `pgm.db.query`, re-runnable). Without `SYNC_TOKEN_HASH` in the env every sync route answers `501 sync is not configured` before touching anything; demo mode boot-refuses any sync token material.
+
+### Security
+- Deploy record — **2026-07-17 ~01:45 ET, private instance (`app-production-62c9`)**: mirror commit `7dc15e2` (= `mabrain-jobhunt` `f98009e`) deployed via `railway up` under the guardian gate `company-os/audit/2026-07-17-sim386-failed-login-visibility-review.md` ("Deploy-gate re-check" — GREEN, owner GO recorded). Evidence: migration 0003 applied in deploy logs; `/healthz` 200; anon `/api/jobs` 401; bad-passphrase login 401 with `ratelimit-limit: 10` / window 900s (2026-07-16 baseline held); anon `/api/auth/failed-logins` 401; anon `/api/sync/manifest` 501 (lane dormant); `JOBHUNT_TRUST_PROXY=1` confirmed; no `SYNC_TOKEN`/`SYNC_TOKEN_HASH` on either instance. Demo instance not redeployed (services are CLI-deployed, not GitHub-wired). Authed `GET /api/auth/failed-logins` → 200 leg deferred to the owner's next login.
 
 ## [0.38.1] - 2026-07-14 04:35 ET
 
