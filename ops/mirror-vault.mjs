@@ -308,8 +308,17 @@ export function writeMirrorEntry({ jobsRoot, jobId, name, bytes, state, summary,
     if (state.entries[key] && state.entries[key] === currentSha) {
       // THREE-WAY SHA CHECK PASSED: the current bytes are the bytes this client
       // itself wrote - the one sanctioned overwrite (the recorded owner
-      // exception). Atomic temp+rename inside the job folder.
-      atomicReplace(target, buf);
+      // exception). Atomic temp+rename inside the job folder. A refused stage
+      // (stale tmp from a crashed pass, case-alias) skips loudly - no delete
+      // path exists to clean it, so the owner resolves it (L1, I7 hardening).
+      try {
+        atomicReplace(target, buf);
+      } catch (e) {
+        summary.skipped += 1;
+        summary.conflicts.push(`update-refused ${key} (${e.code || "error"})`);
+        report("skipped-update-refused", { jobId, name, code: e.code || null });
+        return "skipped-update-refused";
+      }
       state.entries[key] = newSha;
       recordVaultHash(state, key, target, newSha);
       summary.updated += 1;
@@ -356,7 +365,14 @@ export function writeMirrorEntry({ jobsRoot, jobId, name, bytes, state, summary,
 // the replace primitive - no unlink exists on this path (or anywhere here).
 function atomicReplace(target, buf) {
   const tmp = `${target}.mirror-tmp`;
-  fs.writeFileSync(tmp, buf);
+  // "wx"-exclusive stage (L1): a pre-existing tmp file refuses the update
+  // instead of being clobbered; the caller routes EEXIST to skip-report.
+  const fd = fs.openSync(tmp, "wx");
+  try {
+    fs.writeFileSync(fd, buf);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, target);
 }
 

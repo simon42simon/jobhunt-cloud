@@ -215,6 +215,22 @@ describe("export surface (real mode, all four token lanes configured)", () => {
       expect(run.verified).toBe(true);
       expect(run.evil).toBeUndefined(); // whitelist, not passthrough
     });
+
+    it("valid-token run reports are rate-capped per IP: 429 beyond the window cap (L5, I7 hardening)", async () => {
+      // The suite has already spent a few reports; hammer to the shared cap (60)
+      // and assert the excess is refused with NO durable line appended.
+      let final = null;
+      for (let i = 0; i < 61; i++) {
+        final = await request(app).post("/api/export/runs").set("authorization", bearer(EXPORT_TOKEN)).send({ jobs: 0 });
+        if (final.status === 429) break;
+      }
+      expect(final.status).toBe(429);
+      const before = readActivity().split(/\r?\n/).filter(Boolean).length;
+      const refused = await request(app).post("/api/export/runs").set("authorization", bearer(EXPORT_TOKEN)).send({ jobs: 0 });
+      expect(refused.status).toBe(429);
+      const after = readActivity().split(/\r?\n/).filter(Boolean).length;
+      expect(after).toBe(before); // a refused report writes nothing durable
+    });
   });
 
   describe("auth gate + SIM-386 visibility", () => {

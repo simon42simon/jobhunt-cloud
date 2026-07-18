@@ -455,6 +455,27 @@ const mirrorAuthFailures = new Map(); // ip -> { count, resetAt }
 // env-overridable so tests can drive the timeout re-poll cheaply).
 const MIRROR_LONGPOLL_HOLD_MS =
   Number(process.env.MIRROR_LONGPOLL_HOLD_MS) > 0 ? Math.floor(Number(process.env.MIRROR_LONGPOLL_HOLD_MS)) : 25_000;
+// L2/L5 (I7 hardening, guardian landing checks): the runs-report routes are the
+// two token lanes' only writes - bounded telemetry appends into the never-deletes
+// activity store. Cap them per IP so even a VALID stolen token cannot spam
+// durable lines; 429 beyond the cap, window resets like the auth limiters.
+const RUNS_REPORT_MAX = 60; // per IP per window, far above any legitimate cadence
+const RUNS_REPORT_WINDOW_MS = 15 * 60 * 1000;
+const runsReportCounts = new Map(); // "<surface>:<ip>" -> { count, resetAt }
+function runsReportLimiter(surface) {
+  return (req, res, next) => {
+    const key = `${surface}:${req.ip}`;
+    const now = Date.now();
+    let entry = runsReportCounts.get(key);
+    if (!entry || now >= entry.resetAt) {
+      entry = { count: 0, resetAt: now + RUNS_REPORT_WINDOW_MS };
+      runsReportCounts.set(key, entry);
+    }
+    entry.count += 1;
+    if (entry.count > RUNS_REPORT_MAX) return res.status(429).json({ error: "too many run reports" });
+    return next();
+  };
+}
 mountMirrorRoutes();
 // The EXPORT snapshot surface (SIM-393 I5, design section D / guardian GC-1..3,
 // GC-5, GC-7). Like the runner/sync/mirror lanes it carries its OWN
@@ -1016,7 +1037,7 @@ function mountMirrorRoutes() {
   // (kind:"mirror", event:"mirror-pass") so unexpected mirror write activity is
   // owner-visible in the app's feed. This is the mirror token's ONLY non-GET
   // route; it appends one telemetry line and can touch no user data.
-  app.post("/api/mirror/runs", mirrorAuth, (req, res) => {
+  app.post("/api/mirror/runs", mirrorAuth, runsReportLimiter("mirror"), (req, res) => {
     const b = req.body || {};
     const n = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Math.floor(Number(x)) : 0);
     store.appendActivity({
@@ -1227,7 +1248,7 @@ function mountExportRoutes() {
   // activity line per export run (kind:"export", event:"export-run") so every
   // run - scheduled or not - is owner-visible in the app's feed. The one
   // sanctioned non-GET on this surface (see the middleware above).
-  app.post("/api/export/runs", exportAuth, (req, res) => {
+  app.post("/api/export/runs", exportAuth, runsReportLimiter("export"), (req, res) => {
     const b = req.body || {};
     const n = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Math.floor(Number(x)) : 0);
     store.appendActivity({

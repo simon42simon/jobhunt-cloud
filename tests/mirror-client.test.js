@@ -215,6 +215,21 @@ describe("V2-3 three-way sha check (only overwrite bytes the mirror itself wrote
     expect(summary.conflicts.some((c) => c.startsWith("divergent"))).toBe(true);
   });
 
+  it("a stale .mirror-tmp refuses the sanctioned update: skip + report, nothing clobbered (L1)", () => {
+    const state = freshState();
+    let summary = mkSummary();
+    expect(writeMirrorEntry({ jobsRoot, jobId, name, bytes: Buffer.from("v1"), state, summary })).toBe("created");
+    // A crashed prior pass left its staged tmp behind; no delete path exists to
+    // clean it, so the wx-exclusive stage must refuse instead of clobbering it.
+    fs.writeFileSync(`${target()}.mirror-tmp`, "stale stage from a crashed pass");
+    summary = mkSummary();
+    expect(writeMirrorEntry({ jobsRoot, jobId, name, bytes: Buffer.from("v2"), state, summary })).toBe("skipped-update-refused");
+    expect(fs.readFileSync(target(), "utf8")).toBe("v1"); // target untouched
+    expect(fs.readFileSync(`${target()}.mirror-tmp`, "utf8")).toBe("stale stage from a crashed pass"); // tmp untouched
+    expect(summary.skipped).toBe(1);
+    expect(summary.conflicts.some((c) => c.startsWith("update-refused"))).toBe(true);
+  });
+
   it("the divergence report is ONE-TIME (transition-report semantics); the skip itself continues", () => {
     const state = freshState();
     fs.mkdirSync(path.join(jobsRoot, jobId), { recursive: true });
