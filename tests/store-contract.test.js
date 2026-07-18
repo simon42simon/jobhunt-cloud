@@ -131,6 +131,86 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
     });
   });
 
+  // ---- webauthn credentials (SIM-394 passkey second factor) ---------------
+  // Plain CRUD contract, identical on both backends. POLICY (the >=2
+  // enforcement rule, the last-credential deletion refusal) is deliberately
+  // NOT here - it lives in the route layer (server/webauthn.js) because it
+  // depends on the env flag, not on storage; tests/webauthn-endpoints.test.js
+  // pins it.
+  describe("webauthn credentials", () => {
+    const CRED = {
+      id: "cred-aaa111",
+      publicKey: "pQECAyYgASFYIAAA", // opaque base64url string to the store
+      counter: 0,
+      transports: ["internal", "hybrid"],
+      label: "laptop-touchid",
+    };
+
+    it("empty store: list [] / count 0 / get null (absent -> empty)", () => {
+      expect(store.listWebauthnCredentials()).toEqual([]);
+      expect(store.countWebauthnCredentials()).toBe(0);
+      expect(store.getWebauthnCredential("nope")).toBe(null);
+    });
+
+    it("create stamps `created` (server-managed) and round-trips every field", () => {
+      const rec = store.createWebauthnCredential(CRED);
+      expect(rec.id).toBe(CRED.id);
+      expect(rec.publicKey).toBe(CRED.publicKey);
+      expect(rec.counter).toBe(0);
+      expect(rec.transports).toEqual(["internal", "hybrid"]);
+      expect(rec.label).toBe("laptop-touchid");
+      expect(typeof rec.created).toBe("string");
+      expect(Number.isNaN(Date.parse(rec.created))).toBe(false);
+
+      const got = store.getWebauthnCredential(CRED.id);
+      expect(got).toEqual(rec);
+      expect(store.countWebauthnCredentials()).toBe(1);
+      expect(store.listWebauthnCredentials()).toEqual([rec]);
+    });
+
+    it("a duplicate credential id is refused with httpStatus 409", () => {
+      store.createWebauthnCredential(CRED);
+      let err = null;
+      try {
+        store.createWebauthnCredential({ ...CRED, label: "other" });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeTruthy();
+      expect(err.httpStatus).toBe(409);
+      expect(store.countWebauthnCredentials()).toBe(1);
+    });
+
+    it("a missing id/publicKey is refused with httpStatus 400", () => {
+      for (const bad of [{ id: "", publicKey: "x" }, { id: "x", publicKey: "" }, {}]) {
+        let err = null;
+        try {
+          store.createWebauthnCredential(bad);
+        } catch (e) {
+          err = e;
+        }
+        expect(err && err.httpStatus).toBe(400);
+      }
+    });
+
+    it("updateWebauthnCredentialCounter persists the new counter; unknown id -> ok:false", () => {
+      store.createWebauthnCredential(CRED);
+      expect(store.updateWebauthnCredentialCounter(CRED.id, 41).ok).toBe(true);
+      expect(store.getWebauthnCredential(CRED.id).counter).toBe(41);
+      expect(store.updateWebauthnCredentialCounter("nope", 1).ok).toBe(false);
+    });
+
+    it("deleteWebauthnCredential deletes by id; unknown id -> deleted:false", () => {
+      store.createWebauthnCredential(CRED);
+      store.createWebauthnCredential({ ...CRED, id: "cred-bbb222", label: "phone" });
+      expect(store.deleteWebauthnCredential("nope")).toEqual({ deleted: false });
+      expect(store.deleteWebauthnCredential(CRED.id)).toEqual({ deleted: true });
+      expect(store.countWebauthnCredentials()).toBe(1);
+      expect(store.getWebauthnCredential(CRED.id)).toBe(null);
+      expect(store.getWebauthnCredential("cred-bbb222")).toBeTruthy();
+    });
+  });
+
   // ---- requests (tolerant absent + verbatim + spawned coercion) ----------
   describe("requests", () => {
     it("yields { requests: [] } when nothing has been written (absent -> empty)", () => {
@@ -457,6 +537,88 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
       } catch (e) {
         expect(e.httpStatus).toBe(400);
       }
+    });
+
+    // ---- drawer upload (SIM-393 I4): INSERT-ONLY unique-name derivation ----
+    // addJobFileUnique is deliberately NOT saveJobArtifact (which upserts): a
+    // collision derives a "<stem> (2).<ext>" sibling and can never replace
+    // existing bytes, on BOTH backends identically.
+    it("addJobFileUnique inserts under the requested name and populates sha256", () => {
+      seedJob();
+      const bytes = Buffer.from("uploaded posting bytes");
+      const r = store.addJobFileUnique("Analyst - OCI", "Posting.pdf", { mime: "application/pdf", bytes });
+      expect(r.result).toBe("inserted");
+      expect(r.name).toBe("Posting.pdf");
+      expect(r.sha256).toMatch(/^[0-9a-f]{64}$/);
+      const f = store.syncManifest().files.find((x) => x.name === "Posting.pdf");
+      expect(f.sha256).toBe(r.sha256);
+      expect(f.bytesLen).toBe(bytes.length);
+    });
+
+    it("addJobFileUnique: a collision derives '<stem> (2).<ext>' then '(3)', never replacing bytes", () => {
+      seedJob();
+      const original = Buffer.from("original bytes");
+      const first = store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: original });
+      expect(first.name).toBe("notes.md");
+      const second = store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: Buffer.from("second DIFFERENT bytes") });
+      expect(second.result).toBe("inserted");
+      expect(second.name).toBe("notes (2).md");
+      const third = store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: Buffer.from("third bytes") });
+      expect(third.name).toBe("notes (3).md");
+      // the original name still holds the ORIGINAL bytes
+      const r = store.openJobFile("Analyst - OCI", "notes.md");
+      expect(r.ok).toBe(true);
+      const chunks = [];
+      r.stream.on("data", (c) => chunks.push(c));
+      return new Promise((resolve) => {
+        r.stream.on("end", () => {
+          expect(Buffer.concat(chunks).equals(original)).toBe(true);
+          resolve();
+        });
+      });
+    });
+
+    it("addJobFileUnique: unknown job -> job-not-found; hostile name -> 400 (shared name-safety)", () => {
+      expect(store.addJobFileUnique("Nope - Nowhere", "x.md", { bytes: Buffer.from("x") })).toEqual({ result: "job-not-found" });
+      seedJob();
+      for (const bad of ["../../etc/passwd", "NUL.txt", "a/b.md", "dot-alias.md."]) {
+        let err = null;
+        try {
+          store.addJobFileUnique("Analyst - OCI", bad, { bytes: Buffer.from("x") });
+        } catch (e) {
+          err = e;
+        }
+        expect(err && err.httpStatus, `name ${JSON.stringify(bad)} must throw 400`).toBe(400);
+      }
+    });
+
+    it("countJobFiles counts companion files (never the SoT job file); unknown job -> null", () => {
+      expect(store.countJobFiles("Nope - Nowhere")).toBeNull();
+      seedJob();
+      expect(store.countJobFiles("Analyst - OCI")).toBe(0); // <Role>.md excluded
+      store.addJobFileIfAbsent("Analyst - OCI", "CV.pdf", { bytes: Buffer.from("cv") });
+      store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: Buffer.from("n") });
+      expect(store.countJobFiles("Analyst - OCI")).toBe(2);
+    });
+
+    // ---- mirror raw job read (SIM-393 I6): both backends, identical shape ----
+    it("mirrorJobDetail returns the RAW front + body + <Role>.md name, rowSha matching the manifest", () => {
+      seedJob();
+      const d = store.mirrorJobDetail("Analyst - OCI");
+      expect(d).toBeTruthy();
+      expect(d.id).toBe("Analyst - OCI");
+      expect(d.name).toBe("Analyst.md"); // the file createJobIfAbsent writes / role-derived
+      expect(d.front).toEqual(front()); // raw fidelity, verbatim keys
+      expect(d.body).toBe("# Analyst - OCI\n\nbody text");
+      expect(d.rowSha).toBe(store.syncManifest().jobs[0].rowSha);
+    });
+
+    it("mirrorJobDetail is null for an unknown / traversal id and is read-only", () => {
+      seedJob();
+      const before = store.syncManifest();
+      expect(store.mirrorJobDetail("Nope - Nowhere")).toBeNull();
+      expect(store.mirrorJobDetail("../escape")).toBeNull();
+      expect(store.syncManifest()).toEqual(before); // read-only: nothing changed
     });
   });
 });

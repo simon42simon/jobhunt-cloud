@@ -302,3 +302,100 @@ describe("sync surface disabled when not configured (501)", () => {
 // tests/app-mode.test.js. A pg-backed demo-boot HTTP test is deliberately omitted
 // here: it needs an ephemeral Postgres (unavailable on an elevated shell) and its
 // slow provisioning would make the gate flaky for zero additional branch coverage.
+
+// ---------------------------------------------------------------------------
+// Block D: the SAME ingest matrix over the REAL PG backend (SIM-393 I2 / D4).
+// The routes are backend-agnostic but the store methods are not (job_files.sha256
+// column, on-conflict-do-nothing SQL, the 404 path), so the matrix re-runs over
+// the full app booted with STORE_BACKEND=pg on an ephemeral embedded Postgres.
+// Skips cleanly when the cluster cannot start - EXCEPT under REQUIRE_EMBEDDED_PG=1
+// (guardian D4), where a provisioning failure hard-fails instead of going
+// vacuously green.
+// ---------------------------------------------------------------------------
+import { startCluster } from "./helpers/embedded-pg.mjs";
+
+const cluster = await startCluster();
+const pgSuite = cluster.available ? describe : describe.skip;
+if (!cluster.available) {
+  console.warn(`[sync-endpoints] PG legs SKIPPED: ${cluster.reason}`);
+}
+
+pgSuite("sync ingest surface over PgStore (full app, real Postgres)", () => {
+  let app, store, tmpRoot;
+
+  beforeAll(async () => {
+    tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sync-ep-pg-"));
+    for (const d of ["Jobs", "docs", "blob"]) fs.mkdirSync(path.join(tmpRoot, d), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, "docs", "tasks.yaml"), "columns: [backlog, todo, in_progress, done]\ntasks: []\n", "utf8");
+    process.env.JOBHUNT_TEST = "1";
+    process.env.JOBHUNT_JOBS_DIR = path.join(tmpRoot, "Jobs");
+    process.env.JOBHUNT_DOCS_DIR = path.join(tmpRoot, "docs");
+    process.env.JOBHUNT_BLOB_DIR = path.join(tmpRoot, "blob");
+    process.env.STORE_BACKEND = "pg";
+    process.env.DATABASE_URL = cluster.url;
+    delete process.env.APP_MODE;
+    delete process.env.JOBHUNT_AUTH;
+    delete process.env.JOBHUNT_AUTH_HASH;
+    process.env.SYNC_TOKEN_HASH = hashToken(SYNC_TOKEN);
+    vi.resetModules();
+    ({ app, store } = await import("../server/index.js"));
+  });
+
+  afterAll(async () => {
+    delete process.env.SYNC_TOKEN_HASH;
+    delete process.env.STORE_BACKEND;
+    delete process.env.DATABASE_URL;
+    delete process.env.JOBHUNT_BLOB_DIR;
+    try {
+      if (store && typeof store.close === "function") store.close();
+    } catch {}
+    await cluster.stop();
+    try {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    } catch {}
+  });
+
+  it("401s anonymously and on a wrong token (PG leg)", async () => {
+    expect((await request(app).get("/api/sync/manifest")).status).toBe(401);
+    expect((await request(app).get("/api/sync/manifest").set("authorization", "Bearer nope")).status).toBe(401);
+  });
+
+  it("insert job 201 -> duplicate 409 (never an overwrite) on Postgres", async () => {
+    const ins = await request(app).post("/api/sync/jobs").set("authorization", syncBearer()).send(jobPayload());
+    expect(ins.status).toBe(201);
+    const m1 = await request(app).get("/api/sync/manifest").set("authorization", syncBearer());
+    const beforeSha = m1.body.jobs.find((j) => j.id === JOB).rowSha;
+    expect(beforeSha).toMatch(/^[0-9a-f]{64}$/);
+    const dup = await request(app).post("/api/sync/jobs").set("authorization", syncBearer()).send({ ...jobPayload(), body: "TAMPERED" });
+    expect(dup.status).toBe(409);
+    const m2 = await request(app).get("/api/sync/manifest").set("authorization", syncBearer());
+    expect(m2.body.jobs.find((j) => j.id === JOB).rowSha).toBe(beforeSha);
+  });
+
+  it("file insert 201 / identical re-send 200 noop / different bytes 409 (PG copy wins)", async () => {
+    const bytes = Buffer.from("%PDF-1.4 pg-backed cv");
+    const ins = await request(app).put(filePath("CV - Data Analyst.pdf")).set("authorization", syncBearer()).set("x-file-sha256", sh(bytes)).send(bytes);
+    expect(ins.status).toBe(201);
+    expect(ins.body.sha256).toBe(sh(bytes));
+    const noop = await request(app).put(filePath("CV - Data Analyst.pdf")).set("authorization", syncBearer()).send(bytes);
+    expect(noop.status).toBe(200);
+    expect(noop.body.noop).toBe(true);
+    const conflict = await request(app).put(filePath("CV - Data Analyst.pdf")).set("authorization", syncBearer()).send(Buffer.from("POISONED"));
+    expect(conflict.status).toBe(409);
+    expect(conflict.body).toEqual({ conflict: "bytes-differ", cloudSha: sh(bytes) });
+    const m = await request(app).get("/api/sync/manifest").set("authorization", syncBearer());
+    expect(m.body.files.find((f) => f.name === "CV - Data Analyst.pdf").sha256).toBe(sh(bytes));
+  });
+
+  it("hostile file name 400 (shared name-safety) and unknown job 404 on Postgres", async () => {
+    expect((await request(app).put(filePath("../../etc/passwd")).set("authorization", syncBearer()).send(Buffer.from("x"))).status).toBe(400);
+    expect((await request(app).put("/api/sync/jobs/Nope%20-%20Nowhere/files/x.md").set("authorization", syncBearer()).send(Buffer.from("x"))).status).toBe(404);
+  });
+
+  it("run summary line lands in the PG activity log", async () => {
+    const r = await request(app).post("/api/sync/runs").set("authorization", syncBearer()).send({ startedAt: "2026-07-17T00:00:00Z", finishedAt: "2026-07-17T00:00:03Z", inserted: { jobs: 1, files: 1 }, noops: 0, conflicts: [], clientVersion: "sync-data/1" });
+    expect(r.status).toBe(201);
+    const lines = store.readActivityText().split(/\r?\n/).filter(Boolean).map((l) => JSON.parse(l));
+    expect(lines.some((x) => x.kind === "sync" && x.event === "sync-run" && x.clientVersion === "sync-data/1")).toBe(true);
+  });
+});

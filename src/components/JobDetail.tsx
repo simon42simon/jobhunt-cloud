@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { api } from "../api";
 import { useEventSubscription } from "../hooks/useEventStream";
 import type { ActivityRecord, AppConfig, JobDetail as JobDetailT, Status } from "../types";
@@ -344,6 +344,30 @@ export function JobDetailDrawer({
   useEventSubscription("run-finished", (e) => {
     if (isRunForJob(e, jobId)) refetch();
   });
+
+  // Drawer upload (SIM-393 I4): a minimal attach affordance on the Files list.
+  // The server is authoritative (insert-only unique-name derivation, size +
+  // demo caps, shared name-safety); on success the drawer refetches (the
+  // pg-backed instances have sse:false - refresh is by refetch, the same flow
+  // every jobs-changed consumer uses) and onChanged() refreshes the board.
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  async function onUploadPick(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!f || !job) return;
+    setUploading(true);
+    setErr(null);
+    try {
+      await api.uploadJobFile(job.id, f, f.name);
+      await refetch();
+      onChanged();
+    } catch (ex) {
+      setErr(String((ex as Error).message || ex));
+    } finally {
+      setUploading(false);
+    }
+  }
 
   // Flush not-yet-saved Next action / Posting URL edits when the drawer closes.
   // Runs on unmount, which is EVERY close path: Esc, backdrop, and the close
@@ -987,7 +1011,9 @@ export function JobDetailDrawer({
                 silent no-op HERE and a surprise window at home, so the button
                 becomes a link that streams the file to THIS device through the
                 guarded read-only reader (view in browser / download). */}
-            {job.files.length > 0 && (
+            {/* Files renders even when empty (SIM-393 I4): the upload
+                affordance must exist on a fileless job too. */}
+            {
               // data-demo-anchor: beat 2 of the demo tour narrates this section
               // once the hero drawer is open (src/lib/demoTour.ts). Inert
               // outside demo mode.
@@ -999,24 +1025,44 @@ export function JobDetailDrawer({
                   <div className="text-[10px] font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                     Files
                   </div>
-                  {/* Reveal the whole job folder in the desktop's file manager -
+                  <div className="flex items-center gap-2">
+                    {/* Minimal upload affordance (SIM-393 I4): picks one file and
+                        POSTs it to the insert-only upload route. The server derives
+                        a unique sibling name on collision - nothing is replaced. */}
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading}
+                      className="inline-flex min-h-[44px] items-center gap-1 rounded-md border border-[var(--color-edge)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] disabled:opacity-50 sm:min-h-0"
+                      title="Attach a file to this job (never replaces an existing file)"
+                    >
+                      {uploading ? "Uploading…" : "Upload ⇪"}
+                    </button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      className="hidden"
+                      onChange={onUploadPick}
+                      aria-label="Upload a file to this job"
+                    />
+                    {/* Reveal the whole job folder in the desktop's file manager -
                       the shortcut next to Files (t-1783481685241). Shown on the
                       server's own desktop ONLY (same honesty gate as the per-file
                       Open buttons below): a remote client has no local folder to
                       reveal, so opening one would just pop a surprise window at
                       home. It reaches every artifact, including any the Files
                       chips don't surface. */}
-                  {isServerDesktopClient(window.location.hostname) && (
-                    <button
-                      onClick={() =>
-                        api.openJobFolder(job.id).catch((e) => setErr(String(e.message || e)))
-                      }
-                      className="inline-flex min-h-[44px] items-center gap-1 rounded-md border border-[var(--color-edge)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] sm:min-h-0"
-                      title="Open this job's folder in your file manager"
-                    >
-                      Open folder ↗
-                    </button>
-                  )}
+                    {isServerDesktopClient(window.location.hostname) && (
+                      <button
+                        onClick={() =>
+                          api.openJobFolder(job.id).catch((e) => setErr(String(e.message || e)))
+                        }
+                        className="inline-flex min-h-[44px] items-center gap-1 rounded-md border border-[var(--color-edge)] bg-[var(--color-panel-2)] px-2 py-1 text-[11px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] sm:min-h-0"
+                        title="Open this job's folder in your file manager"
+                      >
+                        Open folder ↗
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {job.files.map((f) => {
@@ -1052,7 +1098,7 @@ export function JobDetailDrawer({
                   })}
                 </div>
               </div>
-            )}
+            }
 
             {/* Activity timeline (US-7, J3): READ-ONLY, newest-first history
                 merged from this job's routine runs (the `activity` slice already

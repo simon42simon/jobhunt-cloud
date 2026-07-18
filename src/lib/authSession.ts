@@ -7,9 +7,19 @@ import { useSyncExternalStore } from "react";
 // expired cookie lands the owner back on the gate instead of a dead board.
 // Pure module state + a hook - no context, no new dependencies.
 
+// SIM-394: the status body's optional webauthn block (present only when the
+// server's JOBHUNT_WEBAUTHN flag is ON - flag off keeps the body byte-identical
+// to the pre-SIM-394 shape, so this stays optional forever).
+export interface WebauthnStatus {
+  enabled: boolean;
+  enforced: boolean;
+  enrolling: boolean;
+}
+
 export interface AuthStatus {
   authRequired: boolean;
   authenticated: boolean;
+  webauthn?: WebauthnStatus;
 }
 
 // null = not probed yet (LoginGate holds all rendering until the first probe
@@ -33,8 +43,18 @@ export function getAuthStatus(): AuthStatus | null {
   return status;
 }
 
+function sameWebauthn(a: WebauthnStatus | undefined, b: WebauthnStatus | undefined): boolean {
+  if (!a && !b) return true;
+  return !!a && !!b && a.enabled === b.enabled && a.enforced === b.enforced && a.enrolling === b.enrolling;
+}
+
 export function setAuthStatus(next: AuthStatus): void {
-  if (status && status.authRequired === next.authRequired && status.authenticated === next.authenticated) {
+  if (
+    status &&
+    status.authRequired === next.authRequired &&
+    status.authenticated === next.authenticated &&
+    sameWebauthn(status.webauthn, next.webauthn)
+  ) {
     return; // no change - never churn subscribers
   }
   status = next;
@@ -74,6 +94,19 @@ export function loginErrorMessage(httpStatus: number | null): string {
   if (httpStatus === 429) return "Too many attempts - wait a few minutes.";
   if (httpStatus === 401) return "Passphrase not accepted.";
   return "Could not reach the server - try again.";
+}
+
+// SIM-394: the passkey step's copy rule - the SAME generic-error contract as
+// loginErrorMessage, extended to the second factor. The server's assertion lane
+// answers ONE uniform 401 for every failure class (unknown credential, expired
+// challenge, bad signature - server/webauthn.js denyAssertion), and this rule
+// keeps the client just as quiet: one generic line per verdict, never server
+// detail, never the browser's own exception text (a DOMException can name the
+// authenticator). 429 is the login limiter (the assertion lane shares its knobs).
+export function passkeyErrorMessage(httpStatus: number | null): string {
+  if (httpStatus === 429) return "Too many attempts - wait a few minutes.";
+  if (httpStatus === 401) return "Passkey not accepted - try again.";
+  return "Passkey step did not complete - try again.";
 }
 
 // Test seam: reset module state between unit tests. Never called by app code.
