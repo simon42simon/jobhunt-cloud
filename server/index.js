@@ -456,6 +456,23 @@ const mirrorAuthFailures = new Map(); // ip -> { count, resetAt }
 const MIRROR_LONGPOLL_HOLD_MS =
   Number(process.env.MIRROR_LONGPOLL_HOLD_MS) > 0 ? Math.floor(Number(process.env.MIRROR_LONGPOLL_HOLD_MS)) : 25_000;
 mountMirrorRoutes();
+// The EXPORT snapshot surface (SIM-393 I5, design section D / guardian GC-1..3,
+// GC-5, GC-7). Like the runner/sync/mirror lanes it carries its OWN
+// least-privilege bearer-token auth (EXPORT_TOKEN_HASH, verify-only sha256) and
+// MUST be registered BEFORE the cookie gate so the tokened laptop export client
+// is not blocked by the missing session cookie. Scope is READ-ONLY over the full
+// dataset: GET-only enforced as MIDDLEWARE (405 on any other verb) with exactly
+// ONE sanctioned exception - the bounded POST /api/export/runs report line
+// (GC-2's detection signal, the as-built POST /api/mirror/runs precedent). The
+// gap-fill GETs below exist because no token-authed API serves these domains
+// (the session GETs are cookie-gated; the mirror lane is jobs-domain-scoped per
+// GC-9 and must NOT widen); each one is a thin read-only wrapper over an
+// EXISTING store method - no new query surface. 401 anonymous, 501 in demo /
+// when not configured; demo additionally boot-refuses the hash (GC-3).
+const EXPORT_AUTH_MAX_FAILURES = 20; // per IP per window before a 429
+const EXPORT_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
+const exportAuthFailures = new Map(); // ip -> { count, resetAt }
+mountExportRoutes();
 if (auth.enabled) {
   app.use(createAuthGate(auth)); // 401 on any other /api/* without a valid session cookie
 }
@@ -1016,6 +1033,215 @@ function mountMirrorRoutes() {
       conflicts: Array.isArray(b.conflicts)
         ? b.conflicts.slice(0, 200).map((c) => String(c).slice(0, 300))
         : [],
+      clientVersion: typeof b.clientVersion === "string" ? b.clientVersion.slice(0, 64) : null,
+    });
+    res.status(201).json({ ok: true });
+  });
+}
+
+// ---- EXPORT snapshot surface (SIM-393 I5, design section D) -----------------
+// The server half of the cloud->local export snapshot: a read-only,
+// EXPORT_TOKEN-authed view of the ENTIRE dataset, pulled by the laptop client
+// ops/export-snapshot.mjs into the FileStore layout and byte-verified there.
+// EXPORT_TOKEN is the C2/RR-7 credential: full-read-on-theft, so the mitigation
+// set is total - GET-only middleware scope, constant-time verify against the
+// sha256-only EXPORT_TOKEN_HASH, per-IP failure window -> 429, failures feeding
+// SIM-386 as surface:"export", independent rotation (separate from SYNC /
+// MIRROR / RUNNER / the passphrase - no credential grants another's powers,
+// proven by the cross-auth matrix in tests/export-endpoints.test.js), and a
+// detection signal on USE: every export run reports one bounded activity line
+// via POST /api/export/runs (the one sanctioned non-GET, mirror-runs
+// precedent) so an export the owner did not schedule is visible in-app.
+
+// GC-2(d): failed export-token auth feeds the SAME bounded SIM-386 monitor
+// pipeline as the login + sync + mirror surfaces (surface:"export",
+// whitelisted fields only, never credential material).
+const exportFailMonitor = createFailedLoginMonitor({
+  store,
+  env: process.env,
+  surface: "export",
+  defaultReason: "bad_token",
+  windowMs: EXPORT_AUTH_FAIL_WINDOW_MS,
+});
+liveAuthMonitors.push(exportFailMonitor);
+function recordExportAuthFailure(req, reason) {
+  try {
+    exportFailMonitor.record(req, reason);
+  } catch {
+    /* visibility is telemetry - never let it break the auth response */
+  }
+}
+
+// Export bearer-token gate: 501 unless enabled (real mode + EXPORT_TOKEN_HASH -
+// demo additionally boot-refuses the hash outright, GC-3), constant-time
+// verify, per-IP failure counter -> 429.
+function exportAuth(req, res, next) {
+  if (DEMO_MODE) return res.status(501).json({ error: "export is disabled in demo mode" });
+  if (!runtime.exportEnabled) return res.status(501).json({ error: "export is not configured on this instance" });
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const f = exportAuthFailures.get(ip);
+  if (f && f.resetAt > now && f.count >= EXPORT_AUTH_MAX_FAILURES) {
+    recordExportAuthFailure(req, "rate_limited");
+    return res.status(429).json({ error: "too many failed export-auth attempts; try again later" });
+  }
+  const hdr = req.get("authorization") || "";
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : "";
+  if (!verifyRunnerToken(token, process.env.EXPORT_TOKEN_HASH)) {
+    const rec = f && f.resetAt > now ? f : { count: 0, resetAt: now + EXPORT_AUTH_FAIL_WINDOW_MS };
+    rec.count += 1;
+    exportAuthFailures.set(ip, rec);
+    recordExportAuthFailure(req, "bad_token");
+    return res.status(401).json({ error: "invalid export token" });
+  }
+  exportAuthFailures.delete(ip); // reset the failure window on a good auth
+  next();
+}
+
+// Registered BEFORE the cookie auth gate (see the mount block above).
+function mountExportRoutes() {
+  // GC-2(a): the read-only scope is enforced as MIDDLEWARE, not per-route
+  // discipline - any non-GET verb on the export surface is a 405 before any
+  // handler runs, with exactly one sanctioned exception: POST /api/export/runs
+  // (the GC-2(b) run-report line, the token's ONLY write, which appends one
+  // bounded telemetry line and can touch no user data). The 405 body is a
+  // static string (disclosure-safe pre-gate error, same as the 401/501s).
+  app.use("/api/export", (req, res, next) => {
+    if (req.method === "GET") return next();
+    if (req.method === "POST" && req.path === "/runs") return next();
+    return res.status(405).json({ error: "the export surface is read-only (GET only)" });
+  });
+
+  // Snapshot metadata: app version + runtime posture + server time, recorded
+  // into snapshot-manifest.json by the client. Static + store-free.
+  let appVersion = null;
+  try {
+    appVersion = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version || null;
+  } catch {
+    appVersion = null;
+  }
+  app.get("/api/export/meta", exportAuth, (req, res) => {
+    res.json({ app: "jobhunt-cloud", version: appVersion, appMode: runtime.appMode, storeBackend: runtime.storeBackend, ts: new Date().toISOString() });
+  });
+
+  // Jobs domain: the SAME manifest shape the sync/mirror lanes diff against
+  // (metadata + hashes only), served under the export token so EXPORT_TOKEN
+  // never needs (and never gets) access to the sync or mirror surfaces.
+  app.get("/api/export/manifest", exportAuth, (req, res) => {
+    try {
+      res.json(store.syncManifest());
+    } catch (e) {
+      res.status(500).json({ error: "manifest failed" });
+    }
+  });
+
+  // Raw job read for byte-faithful <Role>.md reconstruction (the same
+  // read-only store method the mirror lane uses; re-exposed here because the
+  // mirror surface is MIRROR_TOKEN-scoped per GC-9 and must not widen).
+  app.get("/api/export/jobs/:id", exportAuth, (req, res) => {
+    try {
+      const detail = store.mirrorJobDetail(req.params.id);
+      if (!detail) return res.status(404).json({ error: "job not found" });
+      res.json(detail);
+    } catch (e) {
+      res.status(500).json({ error: "export job read failed" });
+    }
+  });
+
+  // The guarded file reader, export-tokened: the SAME store.openJobFile
+  // (existence-allowlisted, path-contained, read-only) and the SAME
+  // un-scriptable response idiom as the session-gated + mirror-tokened readers
+  // (ADR-014: conservative MIME, nosniff, CSP default-src 'none', no-store).
+  app.get("/api/export/jobs/:id/files/:name", exportAuth, (req, res) => {
+    try {
+      const r = store.openJobFile(req.params.id, req.params.name);
+      if (!r.ok) return res.status(r.status).json({ error: r.error });
+      const asciiName = r.name.replace(/"/g, "'").replace(/[^\x20-\x7e]/g, "_");
+      res.setHeader("Content-Type", JOB_FILE_MIME[r.ext] || "application/octet-stream");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(r.name)}`,
+      );
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "default-src 'none'");
+      res.setHeader("Cache-Control", "private, no-store");
+      r.stream.pipe(res);
+    } catch (e) {
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  // Gap-fill domain reads (no token-authed API existed for any of these; each
+  // is a thin wrapper over the EXISTING store read the session routes use).
+  const domainJson = (fn) => (req, res) => {
+    try {
+      res.json(fn());
+    } catch (e) {
+      res.status(500).json({ error: "export read failed" });
+    }
+  };
+  const domainText = (fn) => (req, res) => {
+    try {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Cache-Control", "private, no-store");
+      res.send(fn());
+    } catch (e) {
+      res.status(500).json({ error: "export read failed" });
+    }
+  };
+  app.get("/api/export/tasks", exportAuth, domainJson(() => store.loadTasks()));
+  app.get("/api/export/requests", exportAuth, domainJson(() => store.loadRequests()));
+  app.get("/api/export/chats", exportAuth, domainJson(() => store.loadChats()));
+  app.get("/api/export/notify-state", exportAuth, domainJson(() => store.loadNotifyState()));
+  app.get("/api/export/sources", exportAuth, domainJson(() => store.loadSources()));
+  app.get("/api/export/activity", exportAuth, domainText(() => store.readActivityText()));
+  app.get("/api/export/telemetry", exportAuth, domainText(() => store.readTelemetryText()));
+
+  // Task-attachment blobs: existence-allowlisted to files a task actually
+  // references (the same rule as the session reader), path-contained via the
+  // storage seam, served with the guarded-reader idiom.
+  app.get("/api/export/attachments/:taskId/:file", exportAuth, (req, res) => {
+    try {
+      const data = store.loadTasks();
+      const task = data.tasks.find((t) => t.id === req.params.taskId);
+      if (!task) return res.status(404).json({ error: "task not found" });
+      const base = path.basename(req.params.file);
+      const record = (Array.isArray(task.attachments) ? task.attachments : []).find((a) => a && a.file === base);
+      if (!record) return res.status(404).json({ error: "attachment not found" });
+      const target = store.attachmentFilePath(task.id, base);
+      if (!target) return res.status(400).json({ error: "invalid path" });
+      if (!fs.existsSync(target)) return res.status(404).json({ error: "attachment file missing" });
+      res.setHeader("Content-Type", record.mime);
+      res.setHeader("Content-Disposition", `inline; filename="${base}"`);
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "default-src 'none'");
+      res.setHeader("Cache-Control", "private, no-store");
+      fs.createReadStream(target).pipe(res);
+    } catch (e) {
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  // GC-2(b): the run-report line - one structured, schema-validated, bounded
+  // activity line per export run (kind:"export", event:"export-run") so every
+  // run - scheduled or not - is owner-visible in the app's feed. The one
+  // sanctioned non-GET on this surface (see the middleware above).
+  app.post("/api/export/runs", exportAuth, (req, res) => {
+    const b = req.body || {};
+    const n = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Math.floor(Number(x)) : 0);
+    store.appendActivity({
+      kind: "export",
+      event: "export-run",
+      startedAt: typeof b.startedAt === "string" ? b.startedAt.slice(0, 64) : null,
+      finishedAt: typeof b.finishedAt === "string" ? b.finishedAt.slice(0, 64) : null,
+      snapshot: typeof b.snapshot === "string" ? b.snapshot.slice(0, 128) : null,
+      jobs: n(b.jobs),
+      files: n(b.files),
+      bytes: n(b.bytes),
+      refused: n(b.refused),
+      verified: b.verified === true,
+      conflicts: Array.isArray(b.conflicts) ? b.conflicts.slice(0, 200).map((c) => String(c).slice(0, 300)) : [],
       clientVersion: typeof b.clientVersion === "string" ? b.clientVersion.slice(0, 64) : null,
     });
     res.status(201).json({ ok: true });

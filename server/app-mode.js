@@ -76,6 +76,16 @@ export function mirrorEnabled(env = {}) {
   return resolveAppMode(env) === "real" && present(env.MIRROR_TOKEN_HASH);
 }
 
+// True only when the EXPORT snapshot surface may run: REAL mode AND the
+// verify-only EXPORT_TOKEN_HASH is present (SIM-393 I5, mirroring syncEnabled /
+// mirrorEnabled). The cloud holds ONLY sha256(token) as EXPORT_TOKEN_HASH; the
+// reusable plaintext lives on the laptop (~/.ssc-secrets). Demo can never
+// satisfy this - it carries no export material and, per GC-3, the isolation
+// gate refuses to boot if it can see any.
+export function exportEnabled(env = {}) {
+  return resolveAppMode(env) === "real" && present(env.EXPORT_TOKEN_HASH);
+}
+
 // True only when Apify egress may run: REAL mode AND an APIFY token is present. In
 // demo mode this is always false (the token is also asserted-absent at boot). The
 // owner's own `apifyEnabled` config flag still gates it further in index.js; this
@@ -139,6 +149,12 @@ export function resolveRuntime(env = {}) {
     if (present(env.MIRROR_TOKEN) || present(env.MIRROR_TOKEN_HASH)) {
       throw isoErr("demo mode must not carry any mirror material (MIRROR_TOKEN / MIRROR_TOKEN_HASH); the demo has no cloud->vault mirror lane");
     }
+    // GC-3 as extended to I5 (SIM-393 export snapshot): the read-only export
+    // credential joins the same clause. The demo has no export lane and must
+    // refuse to boot if it can even SEE the export verify-hash.
+    if (present(env.EXPORT_TOKEN) || present(env.EXPORT_TOKEN_HASH)) {
+      throw isoErr("demo mode must not carry any export material (EXPORT_TOKEN / EXPORT_TOKEN_HASH); the demo has no export snapshot lane");
+    }
   }
 
   return {
@@ -148,6 +164,7 @@ export function resolveRuntime(env = {}) {
     runnerEnabled: runnerEnabled(env),
     syncEnabled: syncEnabled(env),
     mirrorEnabled: mirrorEnabled(env),
+    exportEnabled: exportEnabled(env),
     apifyModeAllows: apifyModeAllows(env),
     resetSecret: demo ? demoResetSecret(env) : null,
   };

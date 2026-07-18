@@ -8,6 +8,7 @@ import {
   runnerEnabled,
   syncEnabled,
   mirrorEnabled,
+  exportEnabled,
   apifyModeAllows,
   demoResetSecret,
 } from "../server/app-mode.js";
@@ -115,6 +116,18 @@ describe("resolveRuntime demo isolation (MF-8 allowlist, MF-9 token-absence)", (
     env.MIRROR_TOKEN_HASH = "abc123";
     expect(() => resolveRuntime(env)).toThrow(/must not carry any mirror material/);
   });
+
+  it("GC-3 (I5): FAILS CLOSED if the demo can see an EXPORT_TOKEN (anything real)", () => {
+    const env = validDemoEnv();
+    env.EXPORT_TOKEN = "should-not-be-here";
+    expect(() => resolveRuntime(env)).toThrow(/must not carry any export material/);
+  });
+
+  it("GC-3 (I5): FAILS CLOSED if the demo can see an EXPORT_TOKEN_HASH (verify-only material)", () => {
+    const env = validDemoEnv();
+    env.EXPORT_TOKEN_HASH = "abc123";
+    expect(() => resolveRuntime(env)).toThrow(/must not carry any export material/);
+  });
 });
 
 describe("real-mode runtime + gates", () => {
@@ -127,6 +140,7 @@ describe("real-mode runtime + gates", () => {
       runnerEnabled: false,
       syncEnabled: false,
       mirrorEnabled: false,
+      exportEnabled: false,
       apifyModeAllows: false,
       resetSecret: null,
     });
@@ -151,6 +165,13 @@ describe("real-mode runtime + gates", () => {
     expect(mirrorEnabled({})).toBe(false);
     // demo can never enable the mirror feed even if material somehow leaked past the gate
     expect(mirrorEnabled({ APP_MODE: "demo", MIRROR_TOKEN_HASH: "h" })).toBe(false);
+  });
+
+  it("exportEnabled requires real mode AND an EXPORT_TOKEN_HASH (SIM-393 I5, mirrors mirrorEnabled)", () => {
+    expect(exportEnabled({ EXPORT_TOKEN_HASH: "h" })).toBe(true);
+    expect(exportEnabled({})).toBe(false);
+    // demo can never enable the export surface even if material somehow leaked past the gate
+    expect(exportEnabled({ APP_MODE: "demo", EXPORT_TOKEN_HASH: "h" })).toBe(false);
   });
 
   it("apifyModeAllows requires real mode AND an APIFY_TOKEN", () => {
