@@ -434,6 +434,27 @@ const SYNC_AUTH_MAX_FAILURES = 20; // per IP per window before a 429 (mirrors th
 const SYNC_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
 const syncAuthFailures = new Map(); // ip -> { count, resetAt }
 mountSyncRoutes();
+// The cloud->vault MIRROR change-feed surface (SIM-393 I6, Owner amendment v2 /
+// guardian delta review 2026-07-18). Like the runner + sync lanes it carries its
+// OWN least-privilege bearer-token auth (MIRROR_TOKEN_HASH, verify-only sha256)
+// and MUST be registered BEFORE the cookie gate so the tokened laptop mirror
+// client is not blocked by the missing session cookie (GC-10: the cookie-gated
+// /api/stream SSE is unusable for this - it 503s at the platform edge on pg
+// instances). Scope is JOBS-DOMAIN GET-ONLY (GC-9): the long-poll change feed,
+// the raw job detail for <Role>.md reconstruction, the guarded file reader, the
+// shared manifest (accepted there via syncOrMirrorManifestAuth) - plus the one
+// narrow POST /api/mirror/runs report endpoint (GC-2's detection signal: it
+// appends ONE structured activity line per WRITING mirror pass and can touch no
+// user data). Everything else 401s this token. 401 anonymous, 501 in demo / when
+// not configured. Consts declared before the mount call (TDZ, same as sync).
+const MIRROR_AUTH_MAX_FAILURES = 20; // per IP per window before a 429
+const MIRROR_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
+const mirrorAuthFailures = new Map(); // ip -> { count, resetAt }
+// How long GET /api/mirror/changes holds an unanswered poll (~25s per V2-3;
+// env-overridable so tests can drive the timeout re-poll cheaply).
+const MIRROR_LONGPOLL_HOLD_MS =
+  Number(process.env.MIRROR_LONGPOLL_HOLD_MS) > 0 ? Math.floor(Number(process.env.MIRROR_LONGPOLL_HOLD_MS)) : 25_000;
+mountMirrorRoutes();
 if (auth.enabled) {
   app.use(createAuthGate(auth)); // 401 on any other /api/* without a valid session cookie
 }
@@ -681,11 +702,48 @@ function syncAuth(req, res, next) {
   next();
 }
 
+// GET /api/sync/manifest is the ONE dual-credential route (SIM-393 I6, GC-9): the
+// mirror client reuses the manifest as its diff source, so a valid MIRROR_TOKEN is
+// accepted HERE and nowhere else on the sync surface (the write routes - POST
+// jobs, PUT files, POST runs - stay SYNC_TOKEN-only and 401 the mirror token; the
+// cross-auth matrix in tests/mirror-endpoints.test.js proves every direction).
+// Failure accounting is shared with the sync lane (same per-IP window, same
+// SIM-386 feed): a bad token on the manifest is one brute-force oracle regardless
+// of which lane the attacker is guessing at.
+function syncOrMirrorManifestAuth(req, res, next) {
+  if (DEMO_MODE) return res.status(501).json({ error: "sync is disabled in demo mode" });
+  const syncOn = runtime.syncEnabled;
+  const mirrorOn = runtime.mirrorEnabled;
+  if (!syncOn && !mirrorOn) return res.status(501).json({ error: "sync is not configured on this instance" });
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const f = syncAuthFailures.get(ip);
+  if (f && f.resetAt > now && f.count >= SYNC_AUTH_MAX_FAILURES) {
+    recordSyncAuthFailure(req, "rate_limited");
+    return res.status(429).json({ error: "too many failed sync-auth attempts; try again later" });
+  }
+  const hdr = req.get("authorization") || "";
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : "";
+  const ok =
+    (syncOn && verifyRunnerToken(token, process.env.SYNC_TOKEN_HASH)) ||
+    (mirrorOn && verifyRunnerToken(token, process.env.MIRROR_TOKEN_HASH));
+  if (!ok) {
+    const rec = f && f.resetAt > now ? f : { count: 0, resetAt: now + SYNC_AUTH_FAIL_WINDOW_MS };
+    rec.count += 1;
+    syncAuthFailures.set(ip, rec);
+    recordSyncAuthFailure(req, "bad_token"); // GC-2(c): feed SIM-386
+    return res.status(401).json({ error: "invalid sync token" });
+  }
+  syncAuthFailures.delete(ip);
+  next();
+}
+
 // Registered BEFORE the cookie auth gate (see the mount block above). All four
 // routes are insert-only + report; the store methods do the additive-only writes.
 function mountSyncRoutes() {
-  // Metadata + hashes only, never file bytes (design B2).
-  app.get("/api/sync/manifest", syncAuth, (req, res) => {
+  // Metadata + hashes only, never file bytes (design B2). Dual-credential per
+  // GC-9: the mirror lane reads its diff source here (see syncOrMirrorManifestAuth).
+  app.get("/api/sync/manifest", syncOrMirrorManifestAuth, (req, res) => {
     try {
       res.json(store.syncManifest());
     } catch (e) {
@@ -781,6 +839,182 @@ function mountSyncRoutes() {
       inserted: { jobs: Number(ins.jobs) || 0, files: Number(ins.files) || 0 },
       noops: Number(b.noops) || 0,
       conflicts: Array.isArray(b.conflicts) ? b.conflicts.slice(0, 200) : [],
+      clientVersion: typeof b.clientVersion === "string" ? b.clientVersion.slice(0, 64) : null,
+    });
+    res.status(201).json({ ok: true });
+  });
+}
+
+// ---- cloud -> vault MIRROR change feed (SIM-393 I6, amendment V2-3/V2-4) ----
+// The server half of the mirror lane: a token-authed LONG-POLL trigger channel +
+// the two jobs-domain reads the laptop mirror client pulls through, under a
+// dedicated mirrorAuth (MIRROR_TOKEN_HASH - a separate EXPORT_TOKEN-class read
+// credential so the standing consumer rotates independently, guardian C4).
+//
+// GC-10: this long-poll IS the primary trigger. The existing GET /api/stream SSE
+// is cookie-gated AND 503s at the platform edge on the pg instances (SIM-390
+// item 3 - /api/config advertises sse:false there), so it is not reused. Event
+// frames are TRIGGERS ONLY: { seq, changed, ts } - a change counter + timestamp,
+// NEVER a job name, file name, or path. The client acts solely on manifest/API
+// responses it validates through the shared name-safety.js + resolveInside.
+//
+// GC-9 scope note: mirrorAuth guards exactly these routes (plus the manifest via
+// syncOrMirrorManifestAuth above). The token opens nothing else - not the sync
+// write routes, not the runner lane, not the cookie-gated session surface
+// (chats/tasks/activity/telemetry/sources/export) - and no other credential
+// opens these routes. Proven by the cross-auth matrix in
+// tests/mirror-endpoints.test.js.
+
+// Long-poll trigger state: a monotonic counter bumped by every jobs-changed
+// broadcast (see broadcast() below) + the set of held responses to wake.
+let mirrorChangeSeq = 0;
+const mirrorChangeWaiters = new Set();
+function notifyMirrorChange() {
+  mirrorChangeSeq += 1;
+  for (const wake of [...mirrorChangeWaiters]) {
+    try {
+      wake();
+    } catch {
+      /* a dead waiter must never break the broadcast path */
+    }
+  }
+}
+
+// GC-9/GC-2: failed mirror-token auth feeds the SAME bounded SIM-386 monitor
+// pipeline as the login + sync surfaces (surface:"mirror", whitelisted fields
+// only, never credential material).
+const mirrorFailMonitor = createFailedLoginMonitor({
+  store,
+  env: process.env,
+  surface: "mirror",
+  defaultReason: "bad_token",
+  windowMs: MIRROR_AUTH_FAIL_WINDOW_MS,
+});
+liveAuthMonitors.push(mirrorFailMonitor);
+function recordMirrorAuthFailure(req, reason) {
+  try {
+    mirrorFailMonitor.record(req, reason);
+  } catch {
+    /* visibility is telemetry - never let it break the auth response */
+  }
+}
+
+// Mirror bearer-token gate: 501 unless enabled (real mode + MIRROR_TOKEN_HASH -
+// demo additionally boot-refuses the hash outright, GC-3), constant-time verify,
+// per-IP failure counter -> 429.
+function mirrorAuth(req, res, next) {
+  if (DEMO_MODE) return res.status(501).json({ error: "mirror is disabled in demo mode" });
+  if (!runtime.mirrorEnabled) return res.status(501).json({ error: "mirror is not configured on this instance" });
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const f = mirrorAuthFailures.get(ip);
+  if (f && f.resetAt > now && f.count >= MIRROR_AUTH_MAX_FAILURES) {
+    recordMirrorAuthFailure(req, "rate_limited");
+    return res.status(429).json({ error: "too many failed mirror-auth attempts; try again later" });
+  }
+  const hdr = req.get("authorization") || "";
+  const token = hdr.startsWith("Bearer ") ? hdr.slice(7).trim() : "";
+  if (!verifyRunnerToken(token, process.env.MIRROR_TOKEN_HASH)) {
+    const rec = f && f.resetAt > now ? f : { count: 0, resetAt: now + MIRROR_AUTH_FAIL_WINDOW_MS };
+    rec.count += 1;
+    mirrorAuthFailures.set(ip, rec);
+    recordMirrorAuthFailure(req, "bad_token");
+    return res.status(401).json({ error: "invalid mirror token" });
+  }
+  mirrorAuthFailures.delete(ip); // reset the failure window on a good auth
+  next();
+}
+
+// Registered BEFORE the cookie auth gate (see the mount block above). Every
+// route is GET-only jobs-domain read except the one bounded activity report.
+function mountMirrorRoutes() {
+  // The trigger channel. Held ~25s (MIRROR_LONGPOLL_HOLD_MS); answers early the
+  // moment a jobs-changed broadcast lands. ?since=<seq> is the client's last-seen
+  // counter: a counter already ahead of it answers immediately (no missed-event
+  // window between polls). The frame carries NO names or paths (GC-10).
+  app.get("/api/mirror/changes", mirrorAuth, (req, res) => {
+    const sinceRaw = Number(req.query.since);
+    const since = Number.isFinite(sinceRaw) ? sinceRaw : -1;
+    const frame = (changed) => ({ seq: mirrorChangeSeq, changed, ts: new Date().toISOString() });
+    if (mirrorChangeSeq > since) return res.json(frame(true));
+    let settled = false;
+    let timer = null;
+    const finish = (changed) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      mirrorChangeWaiters.delete(wake);
+      res.json(frame(changed));
+    };
+    const wake = () => finish(true);
+    mirrorChangeWaiters.add(wake);
+    timer = setTimeout(() => finish(false), MIRROR_LONGPOLL_HOLD_MS);
+    timer.unref?.();
+    req.on("close", () => {
+      settled = true;
+      if (timer) clearTimeout(timer);
+      mirrorChangeWaiters.delete(wake);
+    });
+  });
+
+  // The RAW job read for <Role>.md reconstruction: verbatim frontmatter + body +
+  // the job-file name + rowSha (the client re-verifies the reconstruction against
+  // the manifest rowSha before writing). Read-only on both backends.
+  app.get("/api/mirror/jobs/:id", mirrorAuth, (req, res) => {
+    try {
+      const detail = store.mirrorJobDetail(req.params.id);
+      if (!detail) return res.status(404).json({ error: "job not found" });
+      res.json(detail);
+    } catch (e) {
+      res.status(500).json({ error: "mirror job read failed" });
+    }
+  });
+
+  // The guarded file reader, mirror-tokened: the SAME store.openJobFile
+  // (existence-allowlisted, path-contained, read-only) and the SAME un-scriptable
+  // response idiom as the session-gated GET /api/jobs/:id/files/:name (ADR-014:
+  // conservative MIME map, nosniff, CSP default-src 'none', no-store).
+  app.get("/api/mirror/jobs/:id/files/:name", mirrorAuth, (req, res) => {
+    try {
+      const r = store.openJobFile(req.params.id, req.params.name);
+      if (!r.ok) return res.status(r.status).json({ error: r.error });
+      const asciiName = r.name.replace(/"/g, "'").replace(/[^\x20-\x7e]/g, "_");
+      res.setHeader("Content-Type", JOB_FILE_MIME[r.ext] || "application/octet-stream");
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(r.name)}`,
+      );
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.setHeader("Content-Security-Policy", "default-src 'none'");
+      res.setHeader("Cache-Control", "private, no-store");
+      r.stream.pipe(res);
+    } catch (e) {
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  // GC-2 pattern (the guardian's detection signal): the client reports each
+  // WRITING mirror pass - one structured, schema-validated, bounded activity line
+  // (kind:"mirror", event:"mirror-pass") so unexpected mirror write activity is
+  // owner-visible in the app's feed. This is the mirror token's ONLY non-GET
+  // route; it appends one telemetry line and can touch no user data.
+  app.post("/api/mirror/runs", mirrorAuth, (req, res) => {
+    const b = req.body || {};
+    const n = (x) => (Number.isFinite(Number(x)) && Number(x) >= 0 ? Math.floor(Number(x)) : 0);
+    store.appendActivity({
+      kind: "mirror",
+      event: "mirror-pass",
+      trigger: ["event", "sweep", "poll", "manual"].includes(b.trigger) ? b.trigger : null,
+      startedAt: typeof b.startedAt === "string" ? b.startedAt.slice(0, 64) : null,
+      finishedAt: typeof b.finishedAt === "string" ? b.finishedAt.slice(0, 64) : null,
+      created: n(b.created),
+      updated: n(b.updated),
+      adopted: n(b.adopted),
+      skipped: n(b.skipped),
+      refused: n(b.refused),
+      conflicts: Array.isArray(b.conflicts)
+        ? b.conflicts.slice(0, 200).map((c) => String(c).slice(0, 300))
+        : [],
       clientVersion: typeof b.clientVersion === "string" ? b.clientVersion.slice(0, 64) : null,
     });
     res.status(201).json({ ok: true });
@@ -5655,6 +5889,11 @@ app.get("/api/stream", (req, res) => {
 // Wire format is deliberately simple (one JSON object per `data:` frame) so a new
 // event type is additive and an old client that ignored the payload still works.
 function broadcast(event) {
+  // SIM-393 I6 (GC-10): every jobs-changed broadcast also bumps the mirror change
+  // counter and wakes any held GET /api/mirror/changes long-poll - the SSE fan-out
+  // below is cookie-gated and platform-edge-dead on pg, so the mirror lane rides
+  // this counter instead. The long-poll frame carries only { seq, changed, ts }.
+  if (event && event.type === "jobs-changed") notifyMirrorChange();
   for (const res of clients) {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   }

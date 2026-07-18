@@ -538,6 +538,26 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
         expect(e.httpStatus).toBe(400);
       }
     });
+
+    // ---- mirror raw job read (SIM-393 I6): both backends, identical shape ----
+    it("mirrorJobDetail returns the RAW front + body + <Role>.md name, rowSha matching the manifest", () => {
+      seedJob();
+      const d = store.mirrorJobDetail("Analyst - OCI");
+      expect(d).toBeTruthy();
+      expect(d.id).toBe("Analyst - OCI");
+      expect(d.name).toBe("Analyst.md"); // the file createJobIfAbsent writes / role-derived
+      expect(d.front).toEqual(front()); // raw fidelity, verbatim keys
+      expect(d.body).toBe("# Analyst - OCI\n\nbody text");
+      expect(d.rowSha).toBe(store.syncManifest().jobs[0].rowSha);
+    });
+
+    it("mirrorJobDetail is null for an unknown / traversal id and is read-only", () => {
+      seedJob();
+      const before = store.syncManifest();
+      expect(store.mirrorJobDetail("Nope - Nowhere")).toBeNull();
+      expect(store.mirrorJobDetail("../escape")).toBeNull();
+      expect(store.syncManifest()).toEqual(before); // read-only: nothing changed
+    });
   });
 });
 
