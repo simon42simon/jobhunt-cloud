@@ -87,6 +87,7 @@ const DATA_TABLES = [
   "discovery_meta",
   "discovery_finds",
   "agent_jobs",
+  "webauthn_credentials",
   "board_config",
 ];
 
@@ -657,6 +658,76 @@ export class PgStore {
         this.pg.query("insert into requests (id, doc, ts) values ($1,$2::jsonb,$3)", [id, J(r), r && typeof r.ts === "string" ? r.ts : null]);
       }
     });
+  }
+
+  // ======================================================================
+  // WEBAUTHN CREDENTIALS (SIM-394 passkey second factor)
+  // ======================================================================
+  // Same observable contract as FileStore (tests/store-contract.test.js): plain
+  // CRUD; policy (the >=2 rule / last-credential refusal) stays in the route
+  // layer. publicKey is a base64url string; counter round-trips as a JS number
+  // (bigint column -> pg returns a string -> Number() on read; the WebAuthn
+  // counter is a uint32, safely inside Number range); created is ISO.
+
+  _webauthnRow(r) {
+    return {
+      id: r.id,
+      publicKey: r.public_key,
+      counter: Number(r.counter) || 0,
+      transports: Array.isArray(r.transports) ? r.transports : [],
+      label: r.label == null ? null : r.label,
+      created: r.created_at ? new Date(r.created_at).toISOString() : null,
+    };
+  }
+
+  listWebauthnCredentials() {
+    return this._all(
+      "select id, public_key, counter, transports, label, created_at from webauthn_credentials order by created_at, id",
+      [],
+    ).map((r) => this._webauthnRow(r));
+  }
+
+  countWebauthnCredentials() {
+    const r = this._one("select count(*)::int as n from webauthn_credentials", []);
+    return r ? Number(r.n) : 0;
+  }
+
+  getWebauthnCredential(id) {
+    const r = this._one(
+      "select id, public_key, counter, transports, label, created_at from webauthn_credentials where id=$1",
+      [id],
+    );
+    return r ? this._webauthnRow(r) : null;
+  }
+
+  createWebauthnCredential({ id, publicKey, counter = 0, transports = [], label = null }) {
+    if (typeof id !== "string" || !id || typeof publicKey !== "string" || !publicKey) {
+      throw httpError(400, "credential id and publicKey are required");
+    }
+    if (this.getWebauthnCredential(id)) {
+      throw httpError(409, "credential already registered");
+    }
+    this.pg.query(
+      "insert into webauthn_credentials (id, public_key, counter, transports, label) values ($1,$2,$3,$4,$5)",
+      [
+        id,
+        publicKey,
+        Number(counter) || 0,
+        Array.isArray(transports) ? transports.map(String) : [],
+        label == null ? null : String(label),
+      ],
+    );
+    return this.getWebauthnCredential(id);
+  }
+
+  updateWebauthnCredentialCounter(id, counter) {
+    const r = this.pg.query("update webauthn_credentials set counter=$2 where id=$1", [id, Number(counter) || 0]);
+    return { ok: (r.rowCount || 0) > 0 };
+  }
+
+  deleteWebauthnCredential(id) {
+    const r = this.pg.query("delete from webauthn_credentials where id=$1", [id]);
+    return { deleted: (r.rowCount || 0) > 0 };
   }
 
   // ======================================================================

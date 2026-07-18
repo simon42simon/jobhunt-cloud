@@ -131,6 +131,86 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
     });
   });
 
+  // ---- webauthn credentials (SIM-394 passkey second factor) ---------------
+  // Plain CRUD contract, identical on both backends. POLICY (the >=2
+  // enforcement rule, the last-credential deletion refusal) is deliberately
+  // NOT here - it lives in the route layer (server/webauthn.js) because it
+  // depends on the env flag, not on storage; tests/webauthn-endpoints.test.js
+  // pins it.
+  describe("webauthn credentials", () => {
+    const CRED = {
+      id: "cred-aaa111",
+      publicKey: "pQECAyYgASFYIAAA", // opaque base64url string to the store
+      counter: 0,
+      transports: ["internal", "hybrid"],
+      label: "laptop-touchid",
+    };
+
+    it("empty store: list [] / count 0 / get null (absent -> empty)", () => {
+      expect(store.listWebauthnCredentials()).toEqual([]);
+      expect(store.countWebauthnCredentials()).toBe(0);
+      expect(store.getWebauthnCredential("nope")).toBe(null);
+    });
+
+    it("create stamps `created` (server-managed) and round-trips every field", () => {
+      const rec = store.createWebauthnCredential(CRED);
+      expect(rec.id).toBe(CRED.id);
+      expect(rec.publicKey).toBe(CRED.publicKey);
+      expect(rec.counter).toBe(0);
+      expect(rec.transports).toEqual(["internal", "hybrid"]);
+      expect(rec.label).toBe("laptop-touchid");
+      expect(typeof rec.created).toBe("string");
+      expect(Number.isNaN(Date.parse(rec.created))).toBe(false);
+
+      const got = store.getWebauthnCredential(CRED.id);
+      expect(got).toEqual(rec);
+      expect(store.countWebauthnCredentials()).toBe(1);
+      expect(store.listWebauthnCredentials()).toEqual([rec]);
+    });
+
+    it("a duplicate credential id is refused with httpStatus 409", () => {
+      store.createWebauthnCredential(CRED);
+      let err = null;
+      try {
+        store.createWebauthnCredential({ ...CRED, label: "other" });
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeTruthy();
+      expect(err.httpStatus).toBe(409);
+      expect(store.countWebauthnCredentials()).toBe(1);
+    });
+
+    it("a missing id/publicKey is refused with httpStatus 400", () => {
+      for (const bad of [{ id: "", publicKey: "x" }, { id: "x", publicKey: "" }, {}]) {
+        let err = null;
+        try {
+          store.createWebauthnCredential(bad);
+        } catch (e) {
+          err = e;
+        }
+        expect(err && err.httpStatus).toBe(400);
+      }
+    });
+
+    it("updateWebauthnCredentialCounter persists the new counter; unknown id -> ok:false", () => {
+      store.createWebauthnCredential(CRED);
+      expect(store.updateWebauthnCredentialCounter(CRED.id, 41).ok).toBe(true);
+      expect(store.getWebauthnCredential(CRED.id).counter).toBe(41);
+      expect(store.updateWebauthnCredentialCounter("nope", 1).ok).toBe(false);
+    });
+
+    it("deleteWebauthnCredential deletes by id; unknown id -> deleted:false", () => {
+      store.createWebauthnCredential(CRED);
+      store.createWebauthnCredential({ ...CRED, id: "cred-bbb222", label: "phone" });
+      expect(store.deleteWebauthnCredential("nope")).toEqual({ deleted: false });
+      expect(store.deleteWebauthnCredential(CRED.id)).toEqual({ deleted: true });
+      expect(store.countWebauthnCredentials()).toBe(1);
+      expect(store.getWebauthnCredential(CRED.id)).toBe(null);
+      expect(store.getWebauthnCredential("cred-bbb222")).toBeTruthy();
+    });
+  });
+
   // ---- requests (tolerant absent + verbatim + spawned coercion) ----------
   describe("requests", () => {
     it("yields { requests: [] } when nothing has been written (absent -> empty)", () => {

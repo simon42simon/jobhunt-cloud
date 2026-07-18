@@ -58,6 +58,9 @@ import {
   isBehindTls,
   createDemoWriteLimiter,
 } from "./auth.js";
+// SIM-394 - feature-flagged WebAuthn/passkey second factor. Pure helpers + the
+// route installer; default posture is OFF (see server/webauthn.js header).
+import { resolveWebauthn, createSecondFactorGate, installWebauthnRoutes } from "./webauthn.js";
 // Storage seam (RC-3 / SIM-87, ADR-025). Every persistent read/write goes through
 // `store` so a cloud deployment can swap FileStore for PgStore without touching a
 // route handler. Constructed just below, once the injected domain helpers
@@ -376,12 +379,39 @@ if (DEMO_MODE) {
 // notification fold can overlay its LIVE in-memory window count - durable lines
 // cap out per window (FAILED_LOGIN_DURABLE_CAP), the true count never does.
 const liveAuthMonitors = [];
+// SIM-394: the feature-flagged WebAuthn second factor. resolveWebauthn is
+// strict + fail-loud (a bad flag value, on-without-auth, or a missing
+// rpID/origin refuses to boot); flag absent/off returns {enabled:false} and
+// NOTHING below changes - installAuthRoutes gets secondFactor:null (its
+// handlers stay byte-identical) and installWebauthnRoutes is never called (no
+// /api/webauthn/* route exists). Pinned by tests/webauthn-endpoints.test.js.
+const webauthn = resolveWebauthn({ env: process.env, auth });
 if (auth.enabled) {
   // POST /api/auth/login (rate-limited) / logout, GET status, GET failed-logins.
   // The store rides along (SIM-386) so the failed-login monitor records through
   // the storage seam - durable on FileStore and PgStore alike.
-  const { monitor } = installAuthRoutes(app, auth, process.env, { store });
+  const secondFactor = webauthn.enabled ? createSecondFactorGate({ webauthn, auth, store }) : null;
+  const { monitor } = installAuthRoutes(app, auth, process.env, { store, secondFactor });
   liveAuthMonitors.push(monitor);
+  if (webauthn.enabled) {
+    // The passkey ceremony + enrollment routes (SIM-394). Registered BEFORE the
+    // cookie gate like every auth-lane route; each route carries its own
+    // explicit auth (full session for enrollment/credential management, the
+    // short-lived pending token for the login assertion lane). Its failed-
+    // assertion monitor rides the SAME SIM-386 bounded pipeline under
+    // surface:"webauthn" and overlays the bell via liveAuthMonitors.
+    const { monitor: webauthnMonitor } = installWebauthnRoutes(app, {
+      auth,
+      webauthn,
+      store,
+      env: process.env,
+    });
+    liveAuthMonitors.push(webauthnMonitor);
+    console.log(
+      `[jobhunt] webauthn second factor ENABLED (rpID: ${webauthn.rpID}; ` +
+        `enforced only at >=2 enrolled passkeys - see DEPLOYMENT.md)`,
+    );
+  }
 }
 // The hybrid-runner endpoints (RC-3 / SIM-87 I7) carry their OWN bearer-token auth
 // (RUNNER_TOKEN_HASH) and MUST be registered BEFORE the cookie gate, so a tokened

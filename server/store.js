@@ -86,6 +86,9 @@ export class FileStore {
     this.notifyStateFile = path.join(this.dataDir, "notify-state.json");
     this.chatsFile = path.join(this.dataDir, "job-chats.json");
     this.attachmentsDir = path.join(this.dataDir, "attachments");
+    // SIM-394: registered WebAuthn credentials (passkey second factor), beside
+    // auth.json - server-written, out of git (data-schema.md section 2.12).
+    this.webauthnFile = path.join(this.dataDir, "webauthn-credentials.json");
 
     // DOCS_DIR store (app-managed repo content).
     this.sourcesFile = path.join(this.docsDir, "discovery-sources.yaml");
@@ -625,6 +628,83 @@ export class FileStore {
     }
     writeFileAtomic(target, buf);
     return { result: "inserted", sha256: sha, kind: jobFileKind(name), mime: mime || null };
+  }
+
+  // ======================================================================
+  // WEBAUTHN CREDENTIALS (DATA_DIR) - SIM-394 passkey second factor
+  // ======================================================================
+  // Plain CRUD only: the enforcement policy (the >=2 rule, the last-credential
+  // deletion refusal) lives in the ROUTE layer (server/webauthn.js), because it
+  // depends on the env flag, not on storage. Contract-tested identically on
+  // both backends (tests/store-contract.test.js). publicKey is a base64url
+  // string in BOTH stores; `created` is stamped by the seam (server-managed).
+
+  _loadWebauthn() {
+    try {
+      const obj = JSON.parse(fs.readFileSync(this.webauthnFile, "utf8"));
+      return obj && Array.isArray(obj.credentials) ? obj : { version: 1, credentials: [] };
+    } catch {
+      return { version: 1, credentials: [] };
+    }
+  }
+  _saveWebauthn(data) {
+    writeFileAtomic(this.webauthnFile, JSON.stringify(data, null, 2) + "\n");
+  }
+
+  listWebauthnCredentials() {
+    return this._loadWebauthn().credentials.map((c) => ({ ...c }));
+  }
+
+  countWebauthnCredentials() {
+    return this._loadWebauthn().credentials.length;
+  }
+
+  getWebauthnCredential(id) {
+    const rec = this._loadWebauthn().credentials.find((c) => c.id === id);
+    return rec ? { ...rec } : null;
+  }
+
+  createWebauthnCredential({ id, publicKey, counter = 0, transports = [], label = null }) {
+    if (typeof id !== "string" || !id || typeof publicKey !== "string" || !publicKey) {
+      const e = new Error("credential id and publicKey are required");
+      e.httpStatus = 400;
+      throw e;
+    }
+    const data = this._loadWebauthn();
+    if (data.credentials.some((c) => c.id === id)) {
+      const e = new Error("credential already registered");
+      e.httpStatus = 409;
+      throw e;
+    }
+    const rec = {
+      id,
+      publicKey,
+      counter: Number(counter) || 0,
+      transports: Array.isArray(transports) ? transports.map(String) : [],
+      label: label == null ? null : String(label),
+      created: new Date().toISOString(),
+    };
+    data.credentials.push(rec);
+    this._saveWebauthn(data);
+    return { ...rec };
+  }
+
+  updateWebauthnCredentialCounter(id, counter) {
+    const data = this._loadWebauthn();
+    const rec = data.credentials.find((c) => c.id === id);
+    if (!rec) return { ok: false };
+    rec.counter = Number(counter) || 0;
+    this._saveWebauthn(data);
+    return { ok: true };
+  }
+
+  deleteWebauthnCredential(id) {
+    const data = this._loadWebauthn();
+    const before = data.credentials.length;
+    data.credentials = data.credentials.filter((c) => c.id !== id);
+    if (data.credentials.length === before) return { deleted: false };
+    this._saveWebauthn(data);
+    return { deleted: true };
   }
 
   // ======================================================================

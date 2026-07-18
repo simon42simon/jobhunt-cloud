@@ -469,7 +469,12 @@ export function isAuthOpenPath(reqPath) {
 // AFTER express.json (login reads a JSON body) and BEFORE the gate. `store`
 // (SIM-386) is the storage seam the failed-login monitor records through; when
 // absent the monitor still logs to stdout but persists nothing.
-export function installAuthRoutes(app, auth, env = process.env, { store = null } = {}) {
+// `secondFactor` (SIM-394) is the OPTIONAL WebAuthn second-factor adapter built
+// by server/webauthn.js createSecondFactorGate. Default null = the flag is off =
+// every handler below is BYTE-IDENTICAL to its pre-SIM-394 body (the no-op
+// guarantee); auth.js deliberately does NOT import webauthn.js, so the flag-off
+// dependency graph is unchanged too.
+export function installAuthRoutes(app, auth, env = process.env, { store = null, secondFactor = null } = {}) {
   const monitor = createFailedLoginMonitor({ store, env });
   const limiter = createLoginLimiter(env, {
     onLimited: (req) => monitor.record(req, "rate_limited"),
@@ -480,6 +485,16 @@ export function installAuthRoutes(app, auth, env = process.env, { store = null }
     if (!ok) {
       monitor.record(req, "bad_passphrase");
       return res.status(401).json({ error: "invalid passphrase" });
+    }
+    // SIM-394: when the WebAuthn flag is on AND >=2 passkeys are enrolled
+    // (secondFactor.required() - the anti-lockout rule lives in webauthn.js),
+    // a correct passphrase does NOT issue the session; it issues the short-
+    // lived pending cookie and tells the client a passkey step is owed. Below
+    // the 2-credential floor (enrollment mode) and with the flag off, this
+    // branch never runs and login behaves exactly as before.
+    if (secondFactor && secondFactor.required()) {
+      secondFactor.issuePending(req, res);
+      return res.json({ ok: true, webauthnRequired: true });
     }
     const token = signSession(auth.secret, { exp: Date.now() + SESSION_TTL_MS });
     res.cookie(SESSION_COOKIE, token, sessionCookieOptions(req));
@@ -510,13 +525,23 @@ export function installAuthRoutes(app, auth, env = process.env, { store = null }
       secure: isSecureRequest(req),
       path: "/",
     });
+    // SIM-394: also drop any half-finished second-factor state. No-op when the
+    // flag is off (secondFactor null -> logout is byte-identical to before).
+    if (secondFactor) secondFactor.clearPending(req, res);
     res.json({ ok: true });
   });
 
   // Unauthenticated-safe: lets the UI decide whether to show the login screen.
+  // SIM-394: with the WebAuthn flag ON the body gains a `webauthn` object
+  // (enabled/enforced/enrolling - what the two-step login UI + enrollment nag
+  // key on); flag off -> statusFields is never called and the body is unchanged.
   app.get("/api/auth/status", (req, res) => {
     const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
-    res.json({ authRequired: true, authenticated: verifySession(auth.secret, token) });
+    res.json({
+      authRequired: true,
+      authenticated: verifySession(auth.secret, token),
+      ...(secondFactor ? secondFactor.statusFields() : {}),
+    });
   });
 
   // Hand the monitor back so index.js can overlay its live snapshot onto the

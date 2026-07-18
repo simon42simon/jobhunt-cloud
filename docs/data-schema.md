@@ -26,6 +26,7 @@
    - 2.9 Activity log entry (`activity-log.jsonl`)
    - 2.10 Notify-state (`notify-state.json`) + Notification feed
    - 2.11 Config (`config.json` / `AppConfig`)
+   - 2.12 WebAuthn credential (passkey second factor, SIM-394)
 3. Relations map
 4. Governing rules
 5. Wave-2 schema decisions (Discovery Sources v2)
@@ -476,6 +477,29 @@ The report endpoint validates loudly (new-field ADR-016 posture): each counter p
 
 ---
 
+### 2.12 WebAuthn credential (passkey second factor, SIM-394)
+
+**Purpose:** the registered passkeys backing the feature-flagged WebAuthn SECOND factor on the private cloud instance (`JOBHUNT_WEBAUTHN`; absent/`off` ⇒ the entity is never read or written and no `/api/webauthn/*` endpoint exists — the SIM-386-style no-op standard). The passphrase (ADR-024) stays the first factor.
+
+**Storage:** through the store seam on BOTH backends — FileStore: `<dataDir>/webauthn-credentials.json` (atomic whole-file write, out of git, beside `auth.json`); PgStore: table `webauthn_credentials` (migration `0004_webauthn_credentials.cjs`). Ceremony challenges are NOT an entity: they live in a server-held in-memory TTL map only (single-use, default 2-min TTL) and are never persisted.
+
+**Writer(s):** `POST /api/webauthn/register/verify` (create; session-authed — enrolling requires a logged-in session), `POST /api/webauthn/login/verify` (server-managed signature-counter update on each successful assertion), `DELETE /api/webauthn/credentials/:id` (delete; refused with 409 for the last remaining credential while the flag is on — the anti-lockout floor). Reader: `GET /api/webauthn/credentials` (session-authed; serves only `id`/`label`/`created`/`transports` — never the public key or counter).
+
+**Field table:**
+
+| Field | Type | Required | Stored / Derived | Meaning |
+| --- | --- | --- | --- | --- |
+| `id` | string (base64url) | yes | STORED | The WebAuthn credential id, as minted by the authenticator |
+| `publicKey` | string (base64url COSE key) | yes | STORED | Verification-only public key. No private key material, no biometric data — those never leave the authenticator |
+| `counter` | number | yes | SERVER-MANAGED | Signature counter; monotonically updated on each verified assertion. A regression (clone signal) rejects the login and feeds the failed-login monitor |
+| `transports` | string[] | no | STORED | Authenticator transports as reported at registration (`internal`, `usb`, `hybrid`, …) |
+| `label` | string ≤ 64 chars | no | STORED | Owner-given display label ("laptop-touchid"); sanitized, display-only |
+| `created` | ISO string | yes | SERVER-MANAGED | Enrollment timestamp, stamped by the store seam |
+
+**Lifecycle / invariants:** enforcement arms only at ≥ 2 stored credentials (`JOBHUNT_WEBAUTHN=on` with < 2 = enrollment mode, passphrase-only login still works — the anti-lockout core; full semantics + break-glass in `DEPLOYMENT.md`). Duplicate `id` on create is a 409. Deleting from 2→1 is allowed (drops back to enrollment mode); deleting the last is refused server-side. Failed assertions/registrations are recorded via the SIM-386 monitor pipeline with `surface:"webauthn"` (whitelisted fields only, bounded durable writes — §2.9).
+
+---
+
 ## 3. Relations map
 
 ```
@@ -661,6 +685,7 @@ Per the MODE-4 amendment to the kernel contract (`company-os/decisions/2026-07-1
 - **The four guarantees hold there verbatim** — never auto-submits, never deletes, disclosure before departure; "loopback-only" is satisfied by the auth wall + private DB networking instead of the bind address.
 - **The local file path is FROZEN, not deleted.** This laptop app keeps reading/writing the data zone exactly as documented below; the cloud instance is a separate deployment over the migrated copy. Neither writes to the other.
 - **No Anthropic key, no `claude.exe`, no agent execution on the cloud instance** (D5): agent runs stay laptop-side; the cloud holds only a verify-only sha256 of the runner token.
+- **A passkey second factor is available, feature-flagged OFF (SIM-394).** When the owner sets `JOBHUNT_WEBAUTHN=on` on the private instance, login becomes passphrase → WebAuthn assertion (enforced only once ≥ 2 passkeys are enrolled — below that count the flag is enrollment-only and passphrase login is unchanged, so enabling it can never lock the owner out). What is stored: §2.12 (credential id, public key, counter, transports, label, created — no private key or biometric material, which never leave the authenticator). Break-glass is a single env flip back to `JOBHUNT_WEBAUTHN=off` → passphrase-only (runbook in `DEPLOYMENT.md`). With the flag absent/off the instance behaves byte-identically to this section as previously written.
 - **Failed logins are visible, never silent (SIM-386, guardian RR-1).** Every failed attempt against the auth wall is logged to the platform stream and recorded as a `kind:"auth"` activity-log line (§2.9: timestamp, proxy-derived IP, user-agent, reason, rolling count — **never** the attempted passphrase or any credential material); 3+ failures in a 15-min window surface exactly one "N failed login attempts" notification in the app bell, and recent events are readable authed at `GET /api/auth/failed-logins`. No new data leaves the instance — this is in-app + platform-log visibility only.
 
 ### 7.1 What the app may do
@@ -726,6 +751,7 @@ The vault path is set in `config.json` → `jobsDir` (§2.11); `config.local.jso
 
 | Version | Date | Change |
 | --- | --- | --- |
+| 7 (pending release cut) | 2026-07-17 | **WebAuthn passkey second factor, feature-flagged OFF (SIM-394).** New entity §2.12 WebAuthn credential (id, publicKey, counter, transports, label, created) stored via the store seam on both backends (FileStore `<dataDir>/webauthn-credentials.json`; PgStore `webauthn_credentials`, migration `0004`). New §7.0 disclosure bullet: flag semantics (absent/off = byte-identical prior behavior; on with < 2 credentials = enrollment mode, passphrase-only login unchanged; on with ≥ 2 = passphrase → passkey), the ≥ 2-authenticator anti-lockout floor + last-credential deletion refusal, break-glass = `JOBHUNT_WEBAUTHN=off` env flip (runbook in `DEPLOYMENT.md`). Failed second-factor attempts ride the SIM-386 bounded monitor pipeline as `surface:"webauthn"` (§2.9 `kind:"auth"` lines). Release-manager confirms the app version at cut |
 | 5 | 2026-07-06 | **Apify discovery source disclosed in the schema + data contract (t-1783339605935).** (1) `Source.type` enum extended to `employer\|board\|apify`; `apify` is now an accepted, write-validated type (was reserved, a `{type:"apify"}` write 400'd before). (2) Three apify-only stored fields added to §2.2: `actorId` (required for apify, sanitized, 400 without), `input` (object, default `{}`, run-time clamped to `APIFY_MAX_ITEMS_PER_RUN`), `fieldMap` (object, optional); authoring-surface and invariants rows updated to match. (3) **§7.2 amended + new §7.2.1 added:** the file bridge's blanket "nothing it does leaves the machine" is corrected to a precise, still-strong guarantee (no vault/job/facts/CV/discovery-find/credential data ever leaves) plus one scoped, owner-gated, off-by-default exception: an owner-enabled apify source makes one outbound call to `api.apify.com` carrying ONLY its stored public search query (the C1 invariant: the request body is built solely from the source's own `input`/`actorId`), Bearer-authed from env-only `APIFY_TOKEN` (never committed, never logged), host-allowlisted. §7.1 gains the affirmative "may do" row. This is a scoped exception for the owner's own public query, NOT a loosening of never-leaves-machine for user data. Lands this wave with the concurrent Apify build (`server/index.js` accept + run path, `src/` form); design: `docs/proposals/2026-07-06-apify-discovery-source.md`. Governance ADR fold-in owed on merge (proposal §11); release-manager confirms the app version at cut |
 | 4 | 2026-07-04 | Four field-level changes in one window (software-architect). (1) **Run honesty counters** (t-1783200897663 a): `RunRecord.candidatesReviewed`/`alreadyTracked`/`filteredOut` (agent-reported via the new `POST /api/discovery/sources/:id/runs/:runId/report`; prompt carries the run's own id) + derived `lastRunSignal` (`leads\|dedup\|quiet\|unverified\|null`) so a leadsFound-0 run is legible as healthy dedup vs broken scrape. (2) **Single-source read** (t-1783200897663 b): `GET /api/discovery/sources/:id` serves the registry GET's derived per-source shape + `proposeRunId` + locked degrade. (3) **`Source.fetchMode`** (closed enum `direct-list\|google-site\|alert-email`, loud 400, null=unclassified) **+ `fetchNote`** (t-1783200897663 c), fed into the run prompt; 33/46 committed sources migrated from unambiguous instruction prose (test-guarded). (4) **Job write boundary** (t-1783199066683): `track/fit/sector/tailoring/status` enum-guarded on write, Task posture (invalid silently ignored; clears legal; tolerant read unchanged; `SOURCE_SECTORS` now aliases the one `SECTORS` array), and **`Job.source` wired as discovery provenance** (t-1783199066654): writer `createJobFolder` (pursue resolves explicit `sourceId` else the workbook row's join; `POST /api/jobs` accepts a registry-resolvable `sourceId`), reader `toJob` (served verbatim, legacy free-strings tolerated, not PATCH-writable) — §6 gaps 1 and 2 closed. Related non-schema change, same window: per-(routine, jobId) run lock on the routine runner (t-1783198713071, 409 on a duplicate live/queued run) |
 | 3 | 2026-07-04 | Instruction-proposal loop SHIPPED (server half, t-1783198113775, §5 decision 4): `Source.instructionProposals[]` (append-only `InstructionProposal` sub-entity, full field table in §2.2), provenance fields `instructionsApprovedFrom`/`instructionsUpdatedAt` (SERVER-MANAGED), derived `proposeRunId`, and the `contractGaps` row added to §2.2's derived table (built earlier in W2b, was documented only in §5). Writers: `POST .../instruction-proposals[/propose]` + `PATCH .../instruction-proposals/:proposalId`; readers: `GET /api/discovery/sources` (drawer UX lands next wave). Four as-built amendments recorded under §5 decision 4 (optional `ownerComment`, no scrape-bookkeeping on propose runs, manual-edit provenance clearing, `source-proposals-changed` SSE event). §2.2 authoring-surface + invariants updated accordingly |
