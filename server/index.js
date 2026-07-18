@@ -40,6 +40,7 @@ import {
   agentEventToUpdate,
   runDurationHistory,
   medianMs,
+  resolveUploadPolicy,
 } from "./lib.js";
 // Boot-time orphaned-run reconcile (SIM-70): the SAME core the standalone CLI
 // (ops/activity-log-reconcile.mjs) runs. A restart mid-run orphans the old
@@ -5816,6 +5817,65 @@ app.get("/api/jobs/:id/files/:name", (req, res) => {
     res.status(500).json({ error: String(e.message || e) });
   }
 });
+
+// ---- SIM-393 I4: owner drawer upload ---------------------------------------
+// POST /api/jobs/:id/files - attach ONE file to a job from the drawer. Behind
+// the EXISTING session cookie wall (registered after the auth gate; anonymous
+// 401 on the auth-walled instance) - NOT the sync/mirror/export token lanes
+// (guardian W4: no privilege beyond what the session already grants).
+//
+// Write semantics (design section C, contract-verbatim): INSERT-ONLY via
+// store.addJobFileUnique - a name collision derives a unique sibling
+// ("<stem> (2).<ext>") and returns the ACTUAL stored name in the 201 body; it
+// can never replace existing bytes (saveJobArtifact's upsert is deliberately
+// NOT used here). The name arrives URI-encoded in x-file-name (HTTP headers
+// are Latin1; the vault carries unicode names), is decoded server-side, and
+// must pass the shared name-safety rules (GC-1 corollary). Uploads are served
+// ONLY through the guarded reader above (nosniff + CSP 'none' + no-store), so
+// stored bytes can never script in-app.
+//
+// Caps (GC-4): resolveUploadPolicy - real instance 15 MB (UPLOAD_FILE_MAX_BYTES
+// env-overridable); DEMO instance <= 1 MB AND a per-job file-count cap (6, the
+// ATTACHMENT_MAX_COUNT precedent) because the demo's write surface is anonymous
+// by design (RR-4). express.raw's limit enforces the byte cap (413 over cap,
+// same idiom as the sync PUT).
+const uploadPolicy = resolveUploadPolicy({ demo: DEMO_MODE, env: process.env });
+app.post(
+  "/api/jobs/:id/files",
+  express.raw({ type: () => true, limit: uploadPolicy.maxBytes }),
+  (req, res) => {
+    try {
+      let name = "";
+      try {
+        name = decodeURIComponent(String(req.get("x-file-name") || ""));
+      } catch {
+        return res.status(400).json({ error: "x-file-name must be a URI-encoded file name" });
+      }
+      if (!name) return res.status(400).json({ error: "x-file-name header required" });
+      if (!isSafeName(name)) return res.status(400).json({ error: "bad file name" });
+      const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      if (!body.length) return res.status(400).json({ error: "empty file body" });
+      // GC-4 demo count cap: applied only when the policy carries one (demo).
+      if (uploadPolicy.maxCount != null) {
+        const count = store.countJobFiles(req.params.id);
+        if (count == null) return res.status(404).json({ error: "job not found" });
+        if (count >= uploadPolicy.maxCount) {
+          return res.status(409).json({ error: `job already has the maximum of ${uploadPolicy.maxCount} files` });
+        }
+      }
+      const mime = (req.get("content-type") || "").split(";")[0].trim() || null;
+      const r = store.addJobFileUnique(req.params.id, name, { mime, bytes: body });
+      if (r.result === "job-not-found") return res.status(404).json({ error: "job not found" });
+      // Same refresh signal as every job write: file-backed clients get the SSE
+      // nudge; pg-backed clients (sse:false) refresh by refetch (the drawer
+      // refetches after upload, the board via onChanged).
+      broadcast({ type: "jobs-changed" });
+      res.status(201).json({ name: r.name, mime: r.mime, bytes: body.length, sha256: r.sha256 });
+    } catch (e) {
+      res.status(e.httpStatus || 500).json({ error: String(e.message || e) });
+    }
+  },
+);
 
 // Open a file (CV, cover letter, posting) in its OS default application - on
 // the machine RUNNING the server. Only meaningful when the client IS that

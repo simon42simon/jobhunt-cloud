@@ -630,6 +630,57 @@ export class FileStore {
     return { result: "inserted", sha256: sha, kind: jobFileKind(name), mime: mime || null };
   }
 
+  // SIM-393 I4 - the owner drawer upload: INSERT-ONLY with automatic
+  // unique-name derivation on collision. Deliberately NOT saveJobArtifact
+  // (which upserts - correct for the runner's regenerate flow, wrong for owner
+  // uploads): a name collision here derives a sibling "<stem> (2).<ext>" /
+  // "<stem> (3).<ext>" (the app's _datedCopyName "(n)" suffix convention) and
+  // NEVER replaces existing bytes. The write itself is "wx"-EXCLUSIVE, so even
+  // a race (or NTFS case-insensitive alias) cannot clobber - EEXIST just moves
+  // on to the next candidate name. Returns { result:"inserted", name (the
+  // ACTUAL stored name), sha256, kind, mime } or { result:"job-not-found" }.
+  // Throws httpStatus-400 on an unsafe name (shared name-safety rules).
+  addJobFileUnique(jobId, name, { mime = null, bytes } = {}) {
+    const folderPath = this.jobFolderPath(jobId); // contained + existence-checked
+    if (!folderPath) return { result: "job-not-found" };
+    assertSafeName(name, "file name");
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || "");
+    const sha = sha256Hex(buf);
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    for (let n = 1; n <= 500; n++) {
+      const candidate = n === 1 ? name : `${stem} (${n})${ext}`;
+      assertSafeName(candidate, "file name"); // derivation must also stay in-rules (length cap)
+      const target = resolveInside(folderPath, candidate);
+      try {
+        const fd = fs.openSync(target, "wx"); // exclusive create: a collision can never clobber
+        try {
+          fs.writeFileSync(fd, buf);
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch (e) {
+        if (e && e.code === "EEXIST") continue; // derive the next sibling name
+        throw e;
+      }
+      return { result: "inserted", name: candidate, sha256: sha, kind: jobFileKind(candidate), mime: mime || null };
+    }
+    const e = new Error("could not derive a unique file name (too many collisions)");
+    e.httpStatus = 409;
+    throw e;
+  }
+
+  // Companion-file count for one job (SIM-393 I4 - the GC-4 demo per-job count
+  // cap reads this). Excludes the SoT <Role>.md for parity with PgStore's
+  // job_files table (which never holds the job row's markdown). null for an
+  // unknown/containment-rejected job id.
+  countJobFiles(jobId) {
+    const folderPath = this.jobFolderPath(jobId);
+    if (!folderPath) return null;
+    const jobFile = this._findJobFile(folderPath);
+    return this._listFolderFiles(folderPath).filter((f) => !jobFile || f.name !== jobFile.name).length;
+  }
+
   // The RAW job read the cloud->vault mirror lane needs (SIM-393 I6): the job's
   // frontmatter VERBATIM (raw fidelity, not the derived DTO) + body + the <Role>.md
   // file name, so the laptop mirror client can reconstruct the job file

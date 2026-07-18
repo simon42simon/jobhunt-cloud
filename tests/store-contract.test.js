@@ -539,6 +539,68 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
       }
     });
 
+    // ---- drawer upload (SIM-393 I4): INSERT-ONLY unique-name derivation ----
+    // addJobFileUnique is deliberately NOT saveJobArtifact (which upserts): a
+    // collision derives a "<stem> (2).<ext>" sibling and can never replace
+    // existing bytes, on BOTH backends identically.
+    it("addJobFileUnique inserts under the requested name and populates sha256", () => {
+      seedJob();
+      const bytes = Buffer.from("uploaded posting bytes");
+      const r = store.addJobFileUnique("Analyst - OCI", "Posting.pdf", { mime: "application/pdf", bytes });
+      expect(r.result).toBe("inserted");
+      expect(r.name).toBe("Posting.pdf");
+      expect(r.sha256).toMatch(/^[0-9a-f]{64}$/);
+      const f = store.syncManifest().files.find((x) => x.name === "Posting.pdf");
+      expect(f.sha256).toBe(r.sha256);
+      expect(f.bytesLen).toBe(bytes.length);
+    });
+
+    it("addJobFileUnique: a collision derives '<stem> (2).<ext>' then '(3)', never replacing bytes", () => {
+      seedJob();
+      const original = Buffer.from("original bytes");
+      const first = store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: original });
+      expect(first.name).toBe("notes.md");
+      const second = store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: Buffer.from("second DIFFERENT bytes") });
+      expect(second.result).toBe("inserted");
+      expect(second.name).toBe("notes (2).md");
+      const third = store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: Buffer.from("third bytes") });
+      expect(third.name).toBe("notes (3).md");
+      // the original name still holds the ORIGINAL bytes
+      const r = store.openJobFile("Analyst - OCI", "notes.md");
+      expect(r.ok).toBe(true);
+      const chunks = [];
+      r.stream.on("data", (c) => chunks.push(c));
+      return new Promise((resolve) => {
+        r.stream.on("end", () => {
+          expect(Buffer.concat(chunks).equals(original)).toBe(true);
+          resolve();
+        });
+      });
+    });
+
+    it("addJobFileUnique: unknown job -> job-not-found; hostile name -> 400 (shared name-safety)", () => {
+      expect(store.addJobFileUnique("Nope - Nowhere", "x.md", { bytes: Buffer.from("x") })).toEqual({ result: "job-not-found" });
+      seedJob();
+      for (const bad of ["../../etc/passwd", "NUL.txt", "a/b.md", "dot-alias.md."]) {
+        let err = null;
+        try {
+          store.addJobFileUnique("Analyst - OCI", bad, { bytes: Buffer.from("x") });
+        } catch (e) {
+          err = e;
+        }
+        expect(err && err.httpStatus, `name ${JSON.stringify(bad)} must throw 400`).toBe(400);
+      }
+    });
+
+    it("countJobFiles counts companion files (never the SoT job file); unknown job -> null", () => {
+      expect(store.countJobFiles("Nope - Nowhere")).toBeNull();
+      seedJob();
+      expect(store.countJobFiles("Analyst - OCI")).toBe(0); // <Role>.md excluded
+      store.addJobFileIfAbsent("Analyst - OCI", "CV.pdf", { bytes: Buffer.from("cv") });
+      store.addJobFileUnique("Analyst - OCI", "notes.md", { bytes: Buffer.from("n") });
+      expect(store.countJobFiles("Analyst - OCI")).toBe(2);
+    });
+
     // ---- mirror raw job read (SIM-393 I6): both backends, identical shape ----
     it("mirrorJobDetail returns the RAW front + body + <Role>.md name, rowSha matching the manifest", () => {
       seedJob();

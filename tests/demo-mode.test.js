@@ -22,6 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { startCluster } from "./helpers/embedded-pg.mjs";
 import { DEMO_WRITE_LIMIT_BODY } from "../server/auth.js";
+import { UPLOAD_DEMO_MAX_BYTES, UPLOAD_DEMO_MAX_COUNT } from "../server/lib.js";
 
 const cluster = await startCluster();
 const suite = cluster.available ? describe : describe.skip;
@@ -32,7 +33,7 @@ if (!cluster.available) {
 let app;
 let store;
 let tmpDocs;
-const WRITE_MAX = 10; // low ceiling so the 429 is cheap to reach
+const WRITE_MAX = 30; // low ceiling so the 429 is cheap to reach (roomy enough for the GC-4 upload tests)
 
 if (cluster.available) {
   tmpDocs = fs.mkdtempSync(path.join(os.tmpdir(), "jh-demo-mode-"));
@@ -150,6 +151,48 @@ suite("demo mode, end to end (embedded PG)", () => {
     // The transcript names THIS job's folder + role file, not the placeholder.
     expect(run.output).toContain(`${hero.id}/${hero.role}.md`);
     expect(run.output).not.toContain("Demo/Operations Analyst.md");
+  });
+
+  it("GC-4 (SIM-393 I4): the demo upload is capped at <= 1 MB - over-cap is a 413", async () => {
+    const jobs = (await request(app).get("/api/jobs")).body;
+    const target = jobs[jobs.length - 1];
+    const big = Buffer.alloc(UPLOAD_DEMO_MAX_BYTES + 1, 0x41); // one byte over the demo ceiling
+    const r = await request(app)
+      .post(`/api/jobs/${encodeURIComponent(target.id)}/files`)
+      .set("x-file-name", encodeURIComponent("too-big.bin"))
+      .set("content-type", "application/octet-stream")
+      .send(big);
+    writesSpent++;
+    expect(r.status).toBe(413); // the 15 MB real-instance default does NOT apply here
+  });
+
+  it("GC-4 (SIM-393 I4): a small demo upload works (writable showcase), then the per-job count cap 409s", async () => {
+    const jobs = (await request(app).get("/api/jobs")).body;
+    const target = jobs[jobs.length - 1];
+    const detail = (await request(app).get(`/api/jobs/${encodeURIComponent(target.id)}`)).body;
+    const existing = (detail.files || []).length;
+    const room = Math.max(0, UPLOAD_DEMO_MAX_COUNT - existing);
+    // fill the remaining per-job budget - each small upload lands (the demo is
+    // a writable showcase; GC-4 chose the working-small-upload posture over 501)
+    for (let i = 0; i < room; i++) {
+      const ok = await request(app)
+        .post(`/api/jobs/${encodeURIComponent(target.id)}/files`)
+        .set("x-file-name", encodeURIComponent(`demo-upload-${i}.md`))
+        .set("content-type", "text/markdown")
+        .send(Buffer.from(`fictional demo upload ${i}`));
+      writesSpent++;
+      expect(ok.status).toBe(201);
+      expect(ok.body.name).toBe(`demo-upload-${i}.md`);
+    }
+    // the file over the count cap is refused with the pinned 409
+    const over = await request(app)
+      .post(`/api/jobs/${encodeURIComponent(target.id)}/files`)
+      .set("x-file-name", encodeURIComponent("one-too-many.md"))
+      .set("content-type", "text/markdown")
+      .send(Buffer.from("over the per-job cap"));
+    writesSpent++;
+    expect(over.status).toBe(409);
+    expect(over.body.error).toContain(`maximum of ${UPLOAD_DEMO_MAX_COUNT} files`);
   });
 
   it("SIM-388: writes 429 past the per-IP threshold with the pinned body; reads stay open", async () => {
