@@ -551,6 +551,25 @@ export class PgStore {
     return { result: "bytes-differ", sha256: sha, cloudSha: now ? now.sha256 : null };
   }
 
+  // The RAW job read the cloud->vault mirror lane needs (SIM-393 I6): the stored
+  // raw_frontmatter VERBATIM + body + the derived <Role>.md file name (the same
+  // `${sanitizeForPath(role)}.md` FileStore.createJobIfAbsent writes, so the two
+  // backends agree for any store-seeded job - store-contract differential).
+  // READ-ONLY; returns null for an unknown id.
+  mirrorJobDetail(id) {
+    const row = this._one("select id, role, body, raw_frontmatter from jobs where id=$1", [id]);
+    if (!row) return null;
+    const front = row.raw_frontmatter || {};
+    const body = row.body || "";
+    return {
+      id: row.id,
+      name: `${sanitizeForPath(row.role)}.md`,
+      front,
+      body,
+      rowSha: rowShaOf(front, body),
+    };
+  }
+
   // ======================================================================
   // TASK BOARD
   // ======================================================================

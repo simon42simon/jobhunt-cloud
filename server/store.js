@@ -627,6 +627,27 @@ export class FileStore {
     return { result: "inserted", sha256: sha, kind: jobFileKind(name), mime: mime || null };
   }
 
+  // The RAW job read the cloud->vault mirror lane needs (SIM-393 I6): the job's
+  // frontmatter VERBATIM (raw fidelity, not the derived DTO) + body + the <Role>.md
+  // file name, so the laptop mirror client can reconstruct the job file
+  // byte-faithfully ("---\n" + yaml.dump(front) + "---\n" + body - the exact
+  // createJobIfAbsent serialization) and verify it against the manifest rowSha.
+  // READ-ONLY; returns null for an unknown/containment-rejected id. Same observable
+  // contract on PgStore (store-contract differential).
+  mirrorJobDetail(id) {
+    const folderPath = this.jobFolderPath(id); // contained + existence-checked
+    if (!folderPath) return null;
+    const jobFile = this._findJobFile(folderPath);
+    if (!jobFile) return null;
+    return {
+      id,
+      name: jobFile.name,
+      front: jobFile.data,
+      body: jobFile.body,
+      rowSha: rowShaOf(jobFile.data, jobFile.body),
+    };
+  }
+
   // ======================================================================
   // TASK BOARD (DATA_DIR)
   // ======================================================================

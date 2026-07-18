@@ -66,6 +66,16 @@ export function syncEnabled(env = {}) {
   return resolveAppMode(env) === "real" && present(env.SYNC_TOKEN_HASH);
 }
 
+// True only when the cloud->vault MIRROR change-feed surface may run: REAL mode
+// AND the verify-only MIRROR_TOKEN_HASH is present (SIM-393 I6, mirroring
+// syncEnabled). The cloud holds ONLY sha256(token) as MIRROR_TOKEN_HASH; the
+// reusable plaintext lives on the laptop (~/.ssc-secrets). Demo can never satisfy
+// this - it carries no mirror material and, per GC-3 (as extended by the 2026-07-18
+// guardian delta review), the isolation gate refuses to boot if it can see any.
+export function mirrorEnabled(env = {}) {
+  return resolveAppMode(env) === "real" && present(env.MIRROR_TOKEN_HASH);
+}
+
 // True only when Apify egress may run: REAL mode AND an APIFY token is present. In
 // demo mode this is always false (the token is also asserted-absent at boot). The
 // owner's own `apifyEnabled` config flag still gates it further in index.js; this
@@ -123,6 +133,12 @@ export function resolveRuntime(env = {}) {
     if (present(env.SYNC_TOKEN) || present(env.SYNC_TOKEN_HASH)) {
       throw isoErr("demo mode must not carry any sync material (SYNC_TOKEN / SYNC_TOKEN_HASH); the demo has no vault->cloud sync lane");
     }
+    // GC-3 as extended by the SIM-393 I6 guardian delta review (2026-07-18): the
+    // mirror credential joins the same clause. The demo has no cloud->vault mirror
+    // lane and must refuse to boot if it can even SEE the mirror verify-hash.
+    if (present(env.MIRROR_TOKEN) || present(env.MIRROR_TOKEN_HASH)) {
+      throw isoErr("demo mode must not carry any mirror material (MIRROR_TOKEN / MIRROR_TOKEN_HASH); the demo has no cloud->vault mirror lane");
+    }
   }
 
   return {
@@ -131,6 +147,7 @@ export function resolveRuntime(env = {}) {
     storeBackend,
     runnerEnabled: runnerEnabled(env),
     syncEnabled: syncEnabled(env),
+    mirrorEnabled: mirrorEnabled(env),
     apifyModeAllows: apifyModeAllows(env),
     resetSecret: demo ? demoResetSecret(env) : null,
   };
