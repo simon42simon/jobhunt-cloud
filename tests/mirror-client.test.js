@@ -27,6 +27,7 @@ import {
   caseSiblings,
   findCaseCollisions,
   writeMirrorEntry,
+  dismissReported,
   runMirrorPass,
   createDebouncer,
   createApi,
@@ -242,6 +243,59 @@ describe("V2-3 three-way sha check (only overwrite bytes the mirror itself wrote
     expect(s2.skipped).toBe(1); // still skipped
     expect(s2.conflicts).toHaveLength(0); // but not re-reported
     expect(fs.readFileSync(target(), "utf8")).toBe("pre-existing agent work");
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe("V2-3 owner dismissal of the transition report (resolution flow)", () => {
+  const jobId = "Analyst - Acme";
+  const name = "notes.md";
+  const key = `${jobId}/${name}`;
+  const target = () => path.join(jobsRoot, jobId, name);
+
+  it("dismissal writes NOTHING to the vault, but lets the NEXT write overwrite with cloud bytes", () => {
+    const state = freshState();
+    // a pre-existing divergent vault file surfaces in the one-time report (skip)
+    fs.mkdirSync(path.join(jobsRoot, jobId), { recursive: true });
+    fs.writeFileSync(target(), "STALE pre-cutover copy");
+    let summary = mkSummary();
+    expect(writeMirrorEntry({ jobsRoot, jobId, name, bytes: Buffer.from("cloud truth"), state, summary })).toBe("skipped-divergent");
+    expect(state.reported[key]).toBeTruthy();
+    expect(fs.readFileSync(target(), "utf8")).toBe("STALE pre-cutover copy");
+
+    // DISMISS: writes nothing, only marks the path mirror-managed at its current bytes
+    const res = dismissReported(state, jobsRoot);
+    expect(res.dismissed).toEqual([key]);
+    expect(state.reported[key]).toBeUndefined();
+    expect(fs.readFileSync(target(), "utf8")).toBe("STALE pre-cutover copy"); // vault untouched by dismissal itself
+
+    // the next pass now takes the ONE sanctioned overwrite (three-way check passes)
+    summary = mkSummary();
+    expect(writeMirrorEntry({ jobsRoot, jobId, name, bytes: Buffer.from("cloud truth"), state, summary })).toBe("updated");
+    expect(fs.readFileSync(target(), "utf8")).toBe("cloud truth");
+    expect(summary.updated).toBe(1);
+  });
+
+  it("a still-divergent, UN-dismissed path is never overwritten (dismissal is per-report, opt-in)", () => {
+    const state = freshState();
+    fs.mkdirSync(path.join(jobsRoot, jobId), { recursive: true });
+    fs.writeFileSync(target(), "keep me");
+    writeMirrorEntry({ jobsRoot, jobId, name, bytes: Buffer.from("cloud"), state, summary: mkSummary() });
+    // dismiss ONLY some other key -> this one stays reported and protected
+    dismissReported(state, jobsRoot, { only: new Set(["Other - Co/x.md"]) });
+    expect(state.reported[key]).toBeTruthy();
+    const summary = mkSummary();
+    expect(writeMirrorEntry({ jobsRoot, jobId, name, bytes: Buffer.from("cloud"), state, summary })).toBe("skipped-divergent");
+    expect(fs.readFileSync(target(), "utf8")).toBe("keep me");
+  });
+
+  it("a reported path that vanished from disk is left reported (not silently dismissed)", () => {
+    const state = freshState();
+    state.reported["Gone - Co/missing.md"] = "deadbeef";
+    const res = dismissReported(state, jobsRoot);
+    expect(res.missing).toEqual(["Gone - Co/missing.md"]);
+    expect(res.dismissed).toEqual([]);
+    expect(state.reported["Gone - Co/missing.md"]).toBe("deadbeef");
   });
 });
 

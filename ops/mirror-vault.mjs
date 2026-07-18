@@ -211,6 +211,52 @@ export function saveMirrorState(file, state) {
   fs.renameSync(tmp, file); // atomic; the tmp NAME disappears via rename, not unlink
 }
 
+// ---- owner dismissal of transition-report divergences (V2-3 resolution) ------
+// The transition report lists vault paths whose bytes differ from cloud and were
+// NOT written by this mirror (pre-cutover copies, agent work, hand edits). The
+// owner resolves each one of two ways: import-as-copy (push the vault bytes up as
+// a dated sibling via the sync client - preserve them) OR DISMISSAL (accept the
+// vault copy as superseded and let cloud truth flow down). Dismissal writes
+// NOTHING to the vault: it records each reported path's CURRENT vault sha as the
+// mirror's last-written sha, so the next pass's three-way check (state.entries[key]
+// === currentSha) treats those bytes as mirror-owned and performs the ONE
+// sanctioned overwrite with cloud bytes - through the same reviewed write path,
+// with the same activity-log line. GC-1 still applies here: an unsafe stored key
+// is refused, never resolved. A reported path missing from disk is left reported.
+// Re-reading the current bytes (not trusting the stale reported sha) keeps the
+// safe direction: if the vault drifted since the report, we mark the true sha.
+export function dismissReported(state, jobsRoot, { only = null } = {}) {
+  const result = { dismissed: [], missing: [], unsafe: [] };
+  for (const key of Object.keys(state.reported)) {
+    if (only && !only.has(key)) continue;
+    const slash = key.indexOf("/");
+    const jobId = slash === -1 ? key : key.slice(0, slash);
+    const name = slash === -1 ? "" : key.slice(slash + 1);
+    if (!isSafeName(jobId) || !isSafeName(name)) {
+      result.unsafe.push(key);
+      continue;
+    }
+    let target;
+    try {
+      target = resolveInside(resolveInside(jobsRoot, jobId), name);
+    } catch {
+      result.unsafe.push(key);
+      continue;
+    }
+    let currentSha;
+    try {
+      currentSha = sha256Hex(fs.readFileSync(target));
+    } catch {
+      result.missing.push(key); // gone from disk since the report - leave it reported
+      continue;
+    }
+    state.entries[key] = currentSha; // now mirror-managed at its true current bytes
+    delete state.reported[key];
+    result.dismissed.push(key);
+  }
+  return result;
+}
+
 // ---- case-insensitive collision primitives (GC-8) ---------------------------
 // Directory entries that alias `name` under case-insensitive (NTFS/OneDrive)
 // comparison. A missing/unreadable dir is simply "no siblings".
@@ -740,6 +786,20 @@ async function main() {
     return;
   }
   process.on("exit", () => lock.release());
+
+  // --dismiss (V2-3 resolution): accept every reported divergence as superseded
+  // BEFORE running the pass, so this invocation's pass overwrites them with cloud
+  // truth through the sanctioned update path. Writes nothing to the vault itself.
+  if (args.has("--dismiss")) {
+    const state = loadMirrorState(paths.state);
+    const res = dismissReported(state, jobsRoot);
+    saveMirrorState(paths.state, state);
+    log(
+      `dismiss: ${res.dismissed.length} divergence(s) accepted as superseded ` +
+        `(cloud overwrites them on this pass); ${res.missing.length} missing, ${res.unsafe.length} unsafe`,
+    );
+  }
+
   const mode = args.has("--poll") ? "poll" : "longpoll";
   log(`mirroring ${api.host} -> ${jobsRoot} (${mode}, outbound-only, no-delete). Ctrl-C to stop.`);
   await mainLoop({
