@@ -27,6 +27,8 @@
     "check": "npm run typecheck && npm run test && npm run lint:activity-log && npm run lint:audit-freshness && npm run lint:closeout && npm run lint:tokens && npm run lint:audit && npm run lint:secrets"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "13.3.0",
+    "@simplewebauthn/server": "13.3.2",
     "argon2": "^0.44.0",
     "chokidar": "^4.0.3",
     "cors": "^2.8.5",

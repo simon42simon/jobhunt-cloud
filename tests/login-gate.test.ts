@@ -5,6 +5,7 @@ import {
   getAuthStatus,
   loginErrorMessage,
   notifyUnauthorized,
+  passkeyErrorMessage,
   resetAuthForTests,
   setAuthStatus,
 } from "../src/lib/authSession";
@@ -117,5 +118,80 @@ describe("login gate wiring contracts", () => {
   it("Log out lives in the TopBar, calls the logout endpoint, then returns to the gate", () => {
     expect(topbar).toContain("Log out");
     expect(app).toMatch(/api\.logout\(\)[\s\S]{0,200}setAuthStatus\(\{ authRequired: true, authenticated: false \}\)/);
+  });
+});
+
+// --- SIM-394: the two-step reconciliation (guardian mirror condition M1) ------
+// The dev-repo build grew a SECOND LoginGate because SIM-391 was never
+// back-ported there; the mirror reconciles to ONE component - THIS repo's gate,
+// extended. These pins prove the three SIM-391 properties survive the extension
+// and that the flag-off render path is structurally unchanged. The server-side
+// byte-identity (login body {ok:true}, status body deep-equal, no
+// /api/webauthn/* route) is pinned by tests/webauthn-endpoints.test.js block 1.
+
+describe("SIM-394 two-step login reconciliation (one gate, extended)", () => {
+  const gate = read("../src/components/LoginGate.tsx");
+  const session = read("../src/lib/authSession.ts");
+  const passkeys = read("../src/lib/passkeys.ts");
+
+  it("property 1 - status-gated boot survives: nothing renders before the /api/auth/status verdict, both steps stay inside LoginCard behind the same branch", () => {
+    expect(gate).toContain("if (!status) return null;");
+    expect(gate).toContain("if (status.authRequired && !status.authenticated) return <LoginCard />;");
+    // the second step is a LoginCard-internal state, not a second gate or route
+    expect(gate).toContain('useState<"passphrase" | "passkey">("passphrase")');
+  });
+
+  it("property 2 - generic error copy survives on BOTH factors: pure copy rules only, never server/browser detail", () => {
+    // passphrase lane: unchanged rule
+    expect(gate).toContain("loginErrorMessage(res.status)");
+    // passkey lane: its own pure rule; the caught error's own text is never shown
+    expect(gate).toContain("passkeyErrorMessage(e instanceof PasskeyStepError ? e.status : null)");
+    expect(gate).not.toMatch(/setErr\((?:body|data|json|e\.message|String\(e\))/);
+    // and the rule itself leaks nothing per class (server 401s are uniform too)
+    expect(passkeyErrorMessage(401)).toBe("Passkey not accepted - try again.");
+    expect(passkeyErrorMessage(400)).toBe("Passkey step did not complete - try again.");
+    expect(passkeyErrorMessage(null)).toBe("Passkey step did not complete - try again.");
+  });
+
+  it("property 3 - 429 surfacing survives: the assertion lane shares the login limiter and surfaces the same honest line", () => {
+    expect(passkeyErrorMessage(429)).toBe("Too many attempts - wait a few minutes.");
+    expect(loginErrorMessage(429)).toBe("Too many attempts - wait a few minutes.");
+  });
+
+  it("flag-off render is IDENTICAL: the unlocked path returns bare children before any webauthn chrome, and the passkey step is reachable only from the server's webauthnRequired verdict", () => {
+    expect(gate).toContain("if (!status.webauthn?.enabled) return <>{children}</>;");
+    // exactly one transition into the passkey step, gated on the login body
+    expect(gate.match(/setStep\("passkey"\)/g)?.length).toBe(1);
+    expect(gate).toMatch(/if \(body\.webauthnRequired\) \{/);
+    // the locked card's passphrase branch keeps its exact SIM-391 semantics
+    expect(gate).toContain('type="password"');
+    expect(gate).toContain('autoComplete="current-password"');
+    expect(gate).toContain("Private instance · Session required");
+  });
+
+  it("the status store carries the optional webauthn block without churning on identical writes", () => {
+    setAuthStatus({ authRequired: true, authenticated: true, webauthn: { enabled: true, enforced: false, enrolling: true } });
+    const ref = getAuthStatus();
+    setAuthStatus({ authRequired: true, authenticated: true, webauthn: { enabled: true, enforced: false, enrolling: true } });
+    expect(getAuthStatus()).toBe(ref); // identical write dropped
+    setAuthStatus({ authRequired: true, authenticated: true, webauthn: { enabled: true, enforced: true, enrolling: false } });
+    expect(getAuthStatus()).not.toBe(ref); // enforcement flip propagates
+  });
+
+  it("the passkey lane never rides api.ts json() - its 401 cannot trip the global back-to-gate hook mid-ceremony", () => {
+    expect(passkeys).not.toMatch(/from "\.\.\/api"|notifyUnauthorized/);
+    expect(passkeys).toContain('credentials: "same-origin"');
+  });
+
+  it("enrollment chrome (nag banner, Passkeys pill, manager) mounts ONLY when the server reports the flag on", () => {
+    // everything after the flag-off early return is flag-on territory by
+    // construction; pin the early return's position before the banner JSX
+    const offReturn = gate.indexOf("if (!status.webauthn?.enabled) return <>{children}</>;");
+    const banner = gate.indexOf("Passkey enrollment incomplete");
+    const pill = gate.indexOf(">\n        Passkeys\n      </button>");
+    expect(offReturn).toBeGreaterThan(-1);
+    expect(banner).toBeGreaterThan(offReturn);
+    expect(gate).toContain("<PasskeyManager onClose=");
+    expect(pill === -1 || pill > offReturn).toBe(true);
   });
 });
