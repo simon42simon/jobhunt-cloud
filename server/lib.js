@@ -317,6 +317,29 @@ export function isInsideJobsDir(jobsDir, target) {
   return rel && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
+// ---- drawer-upload policy (SIM-393 I4, guardian GC-4) -----------------------
+// PURE + importable so the demo posture is unit-testable without a Postgres
+// boot. The guardian-ratified caps: 15 MB on the REAL instance
+// (UPLOAD_FILE_MAX_BYTES env-overridable, same seam style as the attachment
+// caps); on the DEMO instance the route is capped at <= 1 MB AND carries a
+// per-job file-count cap (precedent: ATTACHMENT_MAX_COUNT = 6). The demo is a
+// writable showcase - a working small upload fits it better than a 501 - but
+// its auth is OFF by design (RR-4), so a 15 MB anonymous raw-byte sink would
+// materially widen the accepted anonymous demo write surface. The demo ceiling
+// is a floor'd min: even a mis-set env cap can never RAISE the demo limit.
+export const UPLOAD_FILE_MAX_BYTES_DEFAULT = 15 * 1024 * 1024; // guardian-ratified real-instance ceiling
+export const UPLOAD_DEMO_MAX_BYTES = 1024 * 1024; // GC-4: binding <= 1 MB demo cap
+export const UPLOAD_DEMO_MAX_COUNT = 6; // GC-4: per-job count cap (ATTACHMENT_MAX_COUNT precedent)
+
+export function resolveUploadPolicy({ demo = false, env = {} } = {}) {
+  const envCap = Number(env.UPLOAD_FILE_MAX_BYTES);
+  const realCap = Number.isFinite(envCap) && envCap > 0 ? Math.floor(envCap) : UPLOAD_FILE_MAX_BYTES_DEFAULT;
+  if (demo) {
+    return { maxBytes: Math.min(realCap, UPLOAD_DEMO_MAX_BYTES), maxCount: UPLOAD_DEMO_MAX_COUNT };
+  }
+  return { maxBytes: realCap, maxCount: null };
+}
+
 // ---- image attachment helpers (ADR-014) -----------------------------------
 // Pure, importable-without-a-server helpers backing the pasted-image upload path
 // (POST /api/tasks/:id/attachments). The upload endpoint NEVER trusts the

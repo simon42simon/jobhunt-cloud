@@ -87,6 +87,7 @@ const DATA_TABLES = [
   "discovery_meta",
   "discovery_finds",
   "agent_jobs",
+  "webauthn_credentials",
   "board_config",
 ];
 
@@ -551,6 +552,67 @@ export class PgStore {
     return { result: "bytes-differ", sha256: sha, cloudSha: now ? now.sha256 : null };
   }
 
+  // SIM-393 I4 - the owner drawer upload: INSERT-ONLY with automatic
+  // unique-name derivation on collision (same observable contract as
+  // FileStore.addJobFileUnique - store-contract differential). Deliberately NOT
+  // saveJobArtifact / _upsertJobFile (which overwrite on name collision): every
+  // candidate is `on conflict (job_id, name) do nothing` + a row-count check,
+  // so a collision derives the next "<stem> (n).<ext>" sibling and can never
+  // replace existing bytes. sha256 populated like every job_files write path.
+  addJobFileUnique(jobId, name, { mime = null, bytes } = {}) {
+    if (!this._one("select id from jobs where id=$1", [jobId])) return { result: "job-not-found" };
+    assertSafeName(name, "file name");
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || "");
+    const sha = sha256Hex(buf);
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    for (let n = 1; n <= 500; n++) {
+      const candidate = n === 1 ? name : `${stem} (${n})${ext}`;
+      assertSafeName(candidate, "file name"); // derivation must also stay in-rules (length cap)
+      const kind = jobFileKind(candidate);
+      const r = this.pg.query(
+        `insert into job_files (job_id, name, mime, kind, bytes, sha256, updated_at)
+         values ($1,$2,$3,$4,$5,$6, now())
+         on conflict (job_id, name) do nothing`,
+        [jobId, candidate, mime, kind, buf, sha],
+      );
+      if (r.rowCount === 1) return { result: "inserted", name: candidate, sha256: sha, kind, mime: mime || null };
+      // conflict: an identically-named row exists (insert-only never touches it);
+      // fall through and derive the next sibling name.
+    }
+    const e = new Error("could not derive a unique file name (too many collisions)");
+    e.httpStatus = 409;
+    throw e;
+  }
+
+  // Companion-file count for one job (SIM-393 I4 - the GC-4 demo per-job count
+  // cap reads this). job_files never holds the SoT <Role>.md, matching
+  // FileStore's exclusion. null for an unknown job id.
+  countJobFiles(jobId) {
+    if (!this._one("select id from jobs where id=$1", [jobId])) return null;
+    const row = this._one("select count(*)::int as n from job_files where job_id=$1", [jobId]);
+    return row ? Number(row.n) : 0;
+  }
+
+  // The RAW job read the cloud->vault mirror lane needs (SIM-393 I6): the stored
+  // raw_frontmatter VERBATIM + body + the derived <Role>.md file name (the same
+  // `${sanitizeForPath(role)}.md` FileStore.createJobIfAbsent writes, so the two
+  // backends agree for any store-seeded job - store-contract differential).
+  // READ-ONLY; returns null for an unknown id.
+  mirrorJobDetail(id) {
+    const row = this._one("select id, role, body, raw_frontmatter from jobs where id=$1", [id]);
+    if (!row) return null;
+    const front = row.raw_frontmatter || {};
+    const body = row.body || "";
+    return {
+      id: row.id,
+      name: `${sanitizeForPath(row.role)}.md`,
+      front,
+      body,
+      rowSha: rowShaOf(front, body),
+    };
+  }
+
   // ======================================================================
   // TASK BOARD
   // ======================================================================
@@ -657,6 +719,76 @@ export class PgStore {
         this.pg.query("insert into requests (id, doc, ts) values ($1,$2::jsonb,$3)", [id, J(r), r && typeof r.ts === "string" ? r.ts : null]);
       }
     });
+  }
+
+  // ======================================================================
+  // WEBAUTHN CREDENTIALS (SIM-394 passkey second factor)
+  // ======================================================================
+  // Same observable contract as FileStore (tests/store-contract.test.js): plain
+  // CRUD; policy (the >=2 rule / last-credential refusal) stays in the route
+  // layer. publicKey is a base64url string; counter round-trips as a JS number
+  // (bigint column -> pg returns a string -> Number() on read; the WebAuthn
+  // counter is a uint32, safely inside Number range); created is ISO.
+
+  _webauthnRow(r) {
+    return {
+      id: r.id,
+      publicKey: r.public_key,
+      counter: Number(r.counter) || 0,
+      transports: Array.isArray(r.transports) ? r.transports : [],
+      label: r.label == null ? null : r.label,
+      created: r.created_at ? new Date(r.created_at).toISOString() : null,
+    };
+  }
+
+  listWebauthnCredentials() {
+    return this._all(
+      "select id, public_key, counter, transports, label, created_at from webauthn_credentials order by created_at, id",
+      [],
+    ).map((r) => this._webauthnRow(r));
+  }
+
+  countWebauthnCredentials() {
+    const r = this._one("select count(*)::int as n from webauthn_credentials", []);
+    return r ? Number(r.n) : 0;
+  }
+
+  getWebauthnCredential(id) {
+    const r = this._one(
+      "select id, public_key, counter, transports, label, created_at from webauthn_credentials where id=$1",
+      [id],
+    );
+    return r ? this._webauthnRow(r) : null;
+  }
+
+  createWebauthnCredential({ id, publicKey, counter = 0, transports = [], label = null }) {
+    if (typeof id !== "string" || !id || typeof publicKey !== "string" || !publicKey) {
+      throw httpError(400, "credential id and publicKey are required");
+    }
+    if (this.getWebauthnCredential(id)) {
+      throw httpError(409, "credential already registered");
+    }
+    this.pg.query(
+      "insert into webauthn_credentials (id, public_key, counter, transports, label) values ($1,$2,$3,$4,$5)",
+      [
+        id,
+        publicKey,
+        Number(counter) || 0,
+        Array.isArray(transports) ? transports.map(String) : [],
+        label == null ? null : String(label),
+      ],
+    );
+    return this.getWebauthnCredential(id);
+  }
+
+  updateWebauthnCredentialCounter(id, counter) {
+    const r = this.pg.query("update webauthn_credentials set counter=$2 where id=$1", [id, Number(counter) || 0]);
+    return { ok: (r.rowCount || 0) > 0 };
+  }
+
+  deleteWebauthnCredential(id) {
+    const r = this.pg.query("delete from webauthn_credentials where id=$1", [id]);
+    return { deleted: (r.rowCount || 0) > 0 };
   }
 
   // ======================================================================

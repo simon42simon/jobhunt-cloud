@@ -86,6 +86,9 @@ export class FileStore {
     this.notifyStateFile = path.join(this.dataDir, "notify-state.json");
     this.chatsFile = path.join(this.dataDir, "job-chats.json");
     this.attachmentsDir = path.join(this.dataDir, "attachments");
+    // SIM-394: registered WebAuthn credentials (passkey second factor), beside
+    // auth.json - server-written, out of git (data-schema.md section 2.12).
+    this.webauthnFile = path.join(this.dataDir, "webauthn-credentials.json");
 
     // DOCS_DIR store (app-managed repo content).
     this.sourcesFile = path.join(this.docsDir, "discovery-sources.yaml");
@@ -625,6 +628,155 @@ export class FileStore {
     }
     writeFileAtomic(target, buf);
     return { result: "inserted", sha256: sha, kind: jobFileKind(name), mime: mime || null };
+  }
+
+  // SIM-393 I4 - the owner drawer upload: INSERT-ONLY with automatic
+  // unique-name derivation on collision. Deliberately NOT saveJobArtifact
+  // (which upserts - correct for the runner's regenerate flow, wrong for owner
+  // uploads): a name collision here derives a sibling "<stem> (2).<ext>" /
+  // "<stem> (3).<ext>" (the app's _datedCopyName "(n)" suffix convention) and
+  // NEVER replaces existing bytes. The write itself is "wx"-EXCLUSIVE, so even
+  // a race (or NTFS case-insensitive alias) cannot clobber - EEXIST just moves
+  // on to the next candidate name. Returns { result:"inserted", name (the
+  // ACTUAL stored name), sha256, kind, mime } or { result:"job-not-found" }.
+  // Throws httpStatus-400 on an unsafe name (shared name-safety rules).
+  addJobFileUnique(jobId, name, { mime = null, bytes } = {}) {
+    const folderPath = this.jobFolderPath(jobId); // contained + existence-checked
+    if (!folderPath) return { result: "job-not-found" };
+    assertSafeName(name, "file name");
+    const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes || "");
+    const sha = sha256Hex(buf);
+    const ext = path.extname(name);
+    const stem = name.slice(0, name.length - ext.length);
+    for (let n = 1; n <= 500; n++) {
+      const candidate = n === 1 ? name : `${stem} (${n})${ext}`;
+      assertSafeName(candidate, "file name"); // derivation must also stay in-rules (length cap)
+      const target = resolveInside(folderPath, candidate);
+      try {
+        const fd = fs.openSync(target, "wx"); // exclusive create: a collision can never clobber
+        try {
+          fs.writeFileSync(fd, buf);
+        } finally {
+          fs.closeSync(fd);
+        }
+      } catch (e) {
+        if (e && e.code === "EEXIST") continue; // derive the next sibling name
+        throw e;
+      }
+      return { result: "inserted", name: candidate, sha256: sha, kind: jobFileKind(candidate), mime: mime || null };
+    }
+    const e = new Error("could not derive a unique file name (too many collisions)");
+    e.httpStatus = 409;
+    throw e;
+  }
+
+  // Companion-file count for one job (SIM-393 I4 - the GC-4 demo per-job count
+  // cap reads this). Excludes the SoT <Role>.md for parity with PgStore's
+  // job_files table (which never holds the job row's markdown). null for an
+  // unknown/containment-rejected job id.
+  countJobFiles(jobId) {
+    const folderPath = this.jobFolderPath(jobId);
+    if (!folderPath) return null;
+    const jobFile = this._findJobFile(folderPath);
+    return this._listFolderFiles(folderPath).filter((f) => !jobFile || f.name !== jobFile.name).length;
+  }
+
+  // The RAW job read the cloud->vault mirror lane needs (SIM-393 I6): the job's
+  // frontmatter VERBATIM (raw fidelity, not the derived DTO) + body + the <Role>.md
+  // file name, so the laptop mirror client can reconstruct the job file
+  // byte-faithfully ("---\n" + yaml.dump(front) + "---\n" + body - the exact
+  // createJobIfAbsent serialization) and verify it against the manifest rowSha.
+  // READ-ONLY; returns null for an unknown/containment-rejected id. Same observable
+  // contract on PgStore (store-contract differential).
+  mirrorJobDetail(id) {
+    const folderPath = this.jobFolderPath(id); // contained + existence-checked
+    if (!folderPath) return null;
+    const jobFile = this._findJobFile(folderPath);
+    if (!jobFile) return null;
+    return {
+      id,
+      name: jobFile.name,
+      front: jobFile.data,
+      body: jobFile.body,
+      rowSha: rowShaOf(jobFile.data, jobFile.body),
+    };
+  }
+
+  // ======================================================================
+  // WEBAUTHN CREDENTIALS (DATA_DIR) - SIM-394 passkey second factor
+  // ======================================================================
+  // Plain CRUD only: the enforcement policy (the >=2 rule, the last-credential
+  // deletion refusal) lives in the ROUTE layer (server/webauthn.js), because it
+  // depends on the env flag, not on storage. Contract-tested identically on
+  // both backends (tests/store-contract.test.js). publicKey is a base64url
+  // string in BOTH stores; `created` is stamped by the seam (server-managed).
+
+  _loadWebauthn() {
+    try {
+      const obj = JSON.parse(fs.readFileSync(this.webauthnFile, "utf8"));
+      return obj && Array.isArray(obj.credentials) ? obj : { version: 1, credentials: [] };
+    } catch {
+      return { version: 1, credentials: [] };
+    }
+  }
+  _saveWebauthn(data) {
+    writeFileAtomic(this.webauthnFile, JSON.stringify(data, null, 2) + "\n");
+  }
+
+  listWebauthnCredentials() {
+    return this._loadWebauthn().credentials.map((c) => ({ ...c }));
+  }
+
+  countWebauthnCredentials() {
+    return this._loadWebauthn().credentials.length;
+  }
+
+  getWebauthnCredential(id) {
+    const rec = this._loadWebauthn().credentials.find((c) => c.id === id);
+    return rec ? { ...rec } : null;
+  }
+
+  createWebauthnCredential({ id, publicKey, counter = 0, transports = [], label = null }) {
+    if (typeof id !== "string" || !id || typeof publicKey !== "string" || !publicKey) {
+      const e = new Error("credential id and publicKey are required");
+      e.httpStatus = 400;
+      throw e;
+    }
+    const data = this._loadWebauthn();
+    if (data.credentials.some((c) => c.id === id)) {
+      const e = new Error("credential already registered");
+      e.httpStatus = 409;
+      throw e;
+    }
+    const rec = {
+      id,
+      publicKey,
+      counter: Number(counter) || 0,
+      transports: Array.isArray(transports) ? transports.map(String) : [],
+      label: label == null ? null : String(label),
+      created: new Date().toISOString(),
+    };
+    data.credentials.push(rec);
+    this._saveWebauthn(data);
+    return { ...rec };
+  }
+
+  updateWebauthnCredentialCounter(id, counter) {
+    const data = this._loadWebauthn();
+    const rec = data.credentials.find((c) => c.id === id);
+    if (!rec) return { ok: false };
+    rec.counter = Number(counter) || 0;
+    this._saveWebauthn(data);
+    return { ok: true };
+  }
+
+  deleteWebauthnCredential(id) {
+    const data = this._loadWebauthn();
+    const before = data.credentials.length;
+    data.credentials = data.credentials.filter((c) => c.id !== id);
+    if (data.credentials.length === before) return { deleted: false };
+    this._saveWebauthn(data);
+    return { deleted: true };
   }
 
   // ======================================================================

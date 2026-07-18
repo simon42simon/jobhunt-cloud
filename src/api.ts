@@ -269,6 +269,23 @@ export const api = {
   taskAttachmentUrl: (taskId: string, file: string) =>
     `/api/tasks/${encodeURIComponent(taskId)}/attachments/${encodeURIComponent(file)}`,
 
+  // Upload ONE file into a job folder from the drawer (SIM-393 I4). Raw bytes
+  // body; the file name rides URI-ENCODED in X-File-Name (headers are Latin1 -
+  // encodeURIComponent keeps a unicode vault-style name lossless; the server
+  // always decodes). The server is authoritative: shared name-safety rules,
+  // size cap (413), demo per-job count cap (409), and INSERT-ONLY unique-name
+  // derivation - the 201 body carries the ACTUAL stored name (a collision
+  // lands as "<stem> (2).<ext>", never a replace).
+  uploadJobFile: (jobId: string, blob: Blob, name: string) =>
+    fetch(`/api/jobs/${encodeURIComponent(jobId)}/files`, {
+      method: "POST",
+      headers: {
+        "Content-Type": blob.type || "application/octet-stream",
+        "X-File-Name": encodeURIComponent(name),
+      },
+      body: blob,
+    }).then((r) => json<{ name: string; mime: string | null; bytes: number; sha256: string }>(r)),
+
   getDiscovery: () => fetch("/api/discovery").then((r) => json<DiscoveryData>(r)),
 
   pursueDiscovery: (d: {
