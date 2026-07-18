@@ -74,6 +74,59 @@ The passphrase is never written in plaintext and never logged; only its Argon2id
 
 **Failed-login visibility (SIM-386).** When auth is on, every failed login attempt — bad passphrase *and* rate-limited 429s — is recorded three ways: (1) a structured line on stdout (the always-on platform log stream, e.g. `railway logs`), (2) a durable `kind:"auth"` line in the activity log via the storage seam (FileStore and PgStore alike), and (3) when failures cross a threshold (default **3 per 15-min window**, tunable via `JOBHUNT_AUTH_ALERT_THRESHOLD` / `JOBHUNT_AUTH_RATELIMIT_WINDOW_MS`) a single **"N failed login attempts"** notification in the in-app bell — one per window, never per failure. What is recorded: timestamp, source IP (proxy-aware via the `JOBHUNT_TRUST_PROXY` opt-in — `req.ip` is the forwarded client, never a raw spoofable header), user-agent, reason (`bad_passphrase` | `rate_limited`), and a rolling count. What is **never** recorded: the attempted passphrase or any credential material — events are built from an explicit field whitelist, never from the request body. **Durable writes are bounded** (guardian condition, SIM-386 review): at most 20 failure lines + 1 threshold line per window ever reach the activity log, no matter how many requests arrive — beyond the cap the in-memory counter keeps counting exactly (the bell shows the true count via a live overlay) and stdout falls back to a sampled heartbeat (every 10th failure), so a flood can never grow the never-deletes store. The same bounded pipeline covers the sync surface's failed token auths (`surface:"sync"`, SIM-393). Recent events are readable authenticated at `GET /api/auth/failed-logins` (including `live`, the true current-window count). With auth off none of this exists (no endpoint, no lines, no notifications).
 
+## WebAuthn passkey second factor (SIM-394; feature-flagged, off by default)
+
+The private cloud instance can require a **passkey (WebAuthn) as a SECOND factor after the passphrase**. The passphrase stays the first factor, unchanged. The whole feature is gated by `JOBHUNT_WEBAUTHN`: **absent or `off` ⇒ byte-identical current behavior** (no `/api/webauthn/*` endpoints exist, login issues the session on the passphrase alone, `GET /api/auth/status` body is unchanged — the same no-op standard as SIM-386, pinned by tests).
+
+### Break-glass (read this FIRST — before enabling anything)
+
+If passkeys ever lock you out (lost authenticator, browser/RP mismatch, broken enrollment):
+
+1. **Flip the flag off**: in Railway → the jobhunt-private service → Variables, set `JOBHUNT_WEBAUTHN=off` (or delete the variable) and redeploy/restart. That single env flip restores **passphrase-only login exactly as before** — no data migration, no code change, no credential cleanup needed. The stored passkey rows are inert while the flag is off.
+2. **Log in with the passphrase** as usual.
+3. **Re-enroll**: fix or replace the authenticators (delete stale ones in the passkey manager, add new ones), then set `JOBHUNT_WEBAUTHN=on` again once ≥ 2 passkeys are registered.
+
+**If ALL passkeys are lost** (every device gone): the same procedure applies — the passphrase is the recovery credential by design. `JOBHUNT_WEBAUTHN=off` → passphrase login → delete every stale credential in the passkey manager → enroll ≥ 2 new passkeys (ideally on independent devices, e.g. laptop platform authenticator + phone) → flip the flag back on. If the passphrase itself is ALSO lost, that is the pre-existing recovery path (re-provision `JOBHUNT_AUTH_HASH` via `ops/auth-setup.mjs`), unchanged by this feature.
+
+Because the flag is only an env read at request time, there is no state in which the app can lock the owner out irrecoverably: env access to the deployment IS the break-glass key.
+
+### Anti-lockout: the ≥ 2-authenticator rule (enrollment mode)
+
+Enforcement **refuses to arm itself until at least 2 passkeys are registered**. Precisely:
+
+- `JOBHUNT_WEBAUTHN=on` with **fewer than 2** stored credentials = **enrollment mode**: login remains passphrase-only (the session is issued on the passphrase exactly as with the flag off), `/api/webauthn/*` endpoints are live so passkeys can be added, and the UI nags after login to finish enrollment. You can never enable your way into a lockout with 0 or 1 credentials.
+- `JOBHUNT_WEBAUTHN=on` with **≥ 2** stored credentials = **enforced**: a correct passphrase no longer issues a session; it issues a short-lived (5-min) httpOnly *pending* cookie (signed with a key derived from — but distinct from — the session secret, so it can never pass the session gate), and only a verified passkey assertion converts it into the real session cookie.
+- Deleting credentials past the floor is refused server-side: with the flag on, the **last remaining credential cannot be deleted** (HTTP 409); deleting down from 2 to 1 is allowed and simply drops the instance back into enrollment mode (passphrase-only login again — never a lockout).
+- Sessions issued before the flag flip stay valid until their normal expiry (7 days); flipping the flag does not revoke them.
+
+### Enrollment runbook (Simon, at a browser)
+
+1. Deploy with `JOBHUNT_WEBAUTHN=on` + `JOBHUNT_WEBAUTHN_RPID` + `JOBHUNT_WEBAUTHN_ORIGIN` set (see the table below). With 0 credentials this is enrollment mode — nothing is enforced yet.
+2. Open the private instance, log in with the passphrase. A banner nags that passkey enrollment is incomplete.
+3. Open the **Passkeys** panel (button bottom-right / the banner's "Manage passkeys"), choose **Add passkey**, give it a label (e.g. "laptop-touchid"), and complete the browser prompt.
+4. Repeat on a **second, independent authenticator** (e.g. the phone, or a hardware key) — labels keep them tellable-apart.
+5. When the list shows **2 registered passkeys**, enforcement arms automatically on the next login: passphrase → passkey prompt → in.
+6. Verify break-glass once while calm: set `JOBHUNT_WEBAUTHN=off`, confirm passphrase-only login works, set it back to `on`.
+
+### Env vars
+
+| Env var | Purpose |
+| --- | --- |
+| `JOBHUNT_WEBAUTHN` | `on` enables the second factor (subject to the ≥ 2-credential rule); absent/`off` ⇒ byte-identical current behavior; any other value fails the boot loudly (strict parse, same posture as `APP_MODE`). |
+| `JOBHUNT_WEBAUTHN_RPID` | The WebAuthn Relying Party ID = the private instance's domain, no scheme (e.g. `jobhunt.example.up.railway.app`). Required when the flag is on; never hardcoded. |
+| `JOBHUNT_WEBAUTHN_ORIGIN` | The exact expected origin (e.g. `https://jobhunt.example.up.railway.app`). Required when the flag is on. |
+| `JOBHUNT_WEBAUTHN_RPNAME` | Optional display name shown by the browser prompt (default "Jobhunt Command Center"). |
+| `JOBHUNT_WEBAUTHN_CHALLENGE_TTL_MS` | Ceremony challenge lifetime (default 120000). Test/tuning knob. |
+
+`JOBHUNT_WEBAUTHN=on` additionally **requires auth to be enabled** (a second factor without a first is a misconfig; the boot fails loudly, mirroring `JOBHUNT_AUTH=required` without a hash). The demo (auth off) can therefore never turn it on.
+
+### What is stored / recorded
+
+- Credential records (both store backends, via the store seam; Postgres table `webauthn_credentials`, migration `0004`): credential id, COSE public key, signature counter, transports, label, created date. **No biometric data, no private key material — those never leave the authenticator.**
+- Ceremony challenges are held **in memory only** (server-held TTL map, single-use). This is a deliberate, documented departure from the stateless-session design; it assumes the single-instance deployment (see the code comment in `server/webauthn.js`).
+- Failed second-factor attempts feed the SIM-386 failed-login monitor (`surface:"webauthn"`, whitelisted fields, bounded durable writes, threshold notification) — never any credential material. Counter regressions (a cloned-authenticator signal) are rejected and recorded the same way.
+- The passkey login/verify endpoints are rate-limited with the same limiter/knobs as the passphrase login.
+
 ## Cloud image + Postgres (RC-3 / SIM-87, ADR-025)
 
 One Docker image serves three deployments, differentiated purely by env (12-factor):
