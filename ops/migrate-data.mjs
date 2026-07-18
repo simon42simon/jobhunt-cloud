@@ -1059,7 +1059,13 @@ export async function migrateData(opts, log = (m) => console.log(m)) {
   const ds = readSourceDataset({ jobsDir, dataDir, docsDir }, log);
 
   // 2. Target work.
-  const client = new pg.Client({ connectionString: databaseUrl });
+  const client = new pg.Client({
+    connectionString: databaseUrl,
+    keepAlive: true, // TCP keepalive so a proxy (e.g. Railway) does not drop a long import mid-transaction
+    keepAliveInitialDelayMillis: 10000,
+    statement_timeout: 0, // no server-side cap on the big job_files insert
+    query_timeout: 0,
+  });
   await client.connect();
   try {
     await assertSchemaMigrated(client);
