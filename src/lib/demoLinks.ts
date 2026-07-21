@@ -7,18 +7,15 @@
 // DemoTour's close panel can never drift apart, and one place to swap in the
 // real URLs.
 //
-// GitHub is a verified real URL (the pre-existing v1 CTA target). CV and
-// LinkedIn are NOT configured anywhere in this repo or the wider workspace
-// (`ops/facts/resume.yaml` carries a literal `linkedin: '' # to fill` -
-// checked before writing this). Rather than silently GUESS a personal
-// profile URL (which could point a visitor at the wrong page, or someone
-// else's profile, presented as if verified), these two are clearly-marked
-// PLACEHOLDER urls pending the real ones - flagged as a finding in the GATE 2
-// fix report, not guessed. Swap the two placeholder constants below for the
-// real URLs when Simon supplies them; no other file needs to change.
-export const CV_URL = "https://example.com/simon-kim-cv"; // PLACEHOLDER - swap for the real CV link
+// All three are real, owner-supplied URLs (2026-07-21). CV is served by this
+// app as a static asset (public/cv/ -> dist/cv/ via the Vite build), so the
+// link is host-agnostic: the same build resolves it on staging and production
+// alike. The public CV variant has the phone number stripped (owner decision);
+// email + LinkedIn remain, and the canonical Master CV keeps the phone for real
+// job applications. One place to swap these if they ever change.
+export const CV_URL = "/cv/simon-kim-cv.pdf";
 export const GITHUB_URL = "https://github.com/simon42simon";
-export const LINKEDIN_URL = "https://example.com/simon-kim-linkedin"; // PLACEHOLDER - swap for the real LinkedIn URL
+export const LINKEDIN_URL = "https://www.linkedin.com/in/simon-sihyeon-kim/";
 
 export interface DemoCtaLink {
   label: string;
