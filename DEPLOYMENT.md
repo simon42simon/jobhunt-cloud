@@ -17,10 +17,12 @@ This app runs in **two modes**: (1) **local-first, single-user** on your machine
 The full standing SOP is **`company-os/docs/sop-release-promotion.md`**. In brief:
 
 1. `npm run check` green (unchanged dev gate) → cut a `vX.Y.Z` tag.
-2. The tag auto-builds the image once and deploys it to the **staging** Railway environment (`deploy.yml` → `build-and-stage`, gated on the `DEPLOY_ENABLED` variable + `RAILWAY_TOKEN` secret).
+2. The tag auto-builds the image once, pushes `ghcr.io/…:vX.Y.Z`, retags the `staging-current` channel alias to it (registry-side, same digest, no rebuild), and redeploys the **staging** Railway service, which is pinned to `:staging-current` (`deploy.yml` → `build-and-stage`, gated on the `DEPLOY_ENABLED` variable + `RAILWAY_STAGING_TOKEN` secret).
 3. Guardian `/security-review` of real-data isolation is GREEN in writing; the qa-tester walks the release journeys against the staging URL and fills the QA scorecard.
-4. On a clean pass, run the **deploy** workflow's `workflow_dispatch` with the tag to promote → the `production` Environment pauses for the owner's approval (the go-live GO) → the SAME image tag deploys to production. No rebuild.
+4. On a clean pass, run the **deploy** workflow's `workflow_dispatch` with the tag to promote → the `production` Environment pauses for the owner's approval (the go-live GO) → the `production-current` alias is retagged to the SAME digest and the production service (pinned to `:production-current`) re-pulls it. No rebuild (`RAILWAY_PRODUCTION_TOKEN` secret).
 5. Verify the production surface is healthy.
+
+Railway topology (verified 2026-07-21): project **jobhunt-private**, service **`app`**, environments **`staging`** (`APP_MODE=demo` fictional seed, auth on, serverless/scale-to-zero, `/healthz` healthcheck) and **`production`**. Repo vars: `RAILWAY_SERVICE=app`; per-environment Railway **project tokens** (least privilege) live in the two secrets above.
 
 Rollback = promote a previous tag (every release is an immutable image tag).
 
