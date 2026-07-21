@@ -95,6 +95,12 @@ describe("real mode (default boot): writes are NOT rate-limited", () => {
   let app;
   let fixture;
 
+  // Explicit timeout (default is 10s): a fresh `import("../server/index.js")"
+  // is a real dynamic module load - fine standalone, but under the FULL suite
+  // (many other files' own server boots/embedded-PG fixtures competing for
+  // CPU) it occasionally missed the default window (GATE 2 fix-lane finding,
+  // 2026-07-21 - a timing flake, not a behavior regression: this hook does no
+  // network I/O, only fs setup + one module import).
   beforeAll(async () => {
     fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jh-writelimit-"));
     fs.mkdirSync(path.join(fixture, "Jobs"), { recursive: true });
@@ -109,7 +115,7 @@ describe("real mode (default boot): writes are NOT rate-limited", () => {
     process.env.JOBHUNT_JOBS_DIR = path.join(fixture, "Jobs");
     process.env.JOBHUNT_DOCS_DIR = path.join(fixture, "docs");
     ({ app } = await import("../server/index.js"));
-  });
+  }, 30000);
 
   afterAll(() => {
     try {
