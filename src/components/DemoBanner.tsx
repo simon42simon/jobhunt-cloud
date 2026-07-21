@@ -1,12 +1,12 @@
+import { DEMO_CTA_LINKS } from "../lib/demoLinks";
+
 // The honest demo label (RC-4 / SIM-88, spec U4 + AC2/AC7): a persistent, calm
 // system readout under the TopBar on EVERY screen - mono uppercase, hairline
 // border, never a loud color block. It carries the two things that must be
-// reachable from anywhere: the CTA (v1 is GitHub only, owner decision
-// 2026-07-16) and the "Replay tour" way back into the guidance (U1). Rendered
-// by App ONLY when /api/config says appMode:"demo" - real mode never sees it.
-
-// v1 CTA target (owner decision 2026-07-16): GitHub only; CV/LinkedIn come later.
-export const DEMO_CTA_URL = "https://github.com/simon42simon";
+// reachable from anywhere: the CTA (SIM-423: CV + GitHub + LinkedIn, per the
+// demo spec §4 - supersedes the v1-only GitHub owner decision 2026-07-16) and
+// the "Replay tour" way back into the guidance (U1). Rendered by App ONLY
+// when /api/config says appMode:"demo" - real mode never sees it.
 
 export function DemoBanner({ onReplayTour }: { onReplayTour: () => void }) {
   return (
@@ -23,16 +23,20 @@ export function DemoBanner({ onReplayTour }: { onReplayTour: () => void }) {
         >
           Replay tour
         </button>
+        <span className="text-[11px] text-[var(--color-muted)]">Built by Simon Kim ·</span>
         {/* Plain <a> navigation - no fetch, so the demo's 'self'-only CSP is
             untouched. noopener/noreferrer per the app's external-link idiom. */}
-        <a
-          href={DEMO_CTA_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="inline-flex min-h-[44px] items-center text-[11px] text-[var(--color-accent-text)] underline decoration-[var(--color-edge)] underline-offset-2 hover:decoration-[var(--color-accent-text)] sm:min-h-0"
-        >
-          Built by Simon Kim · GitHub ↗
-        </a>
+        {DEMO_CTA_LINKS.map((link) => (
+          <a
+            key={link.label}
+            href={link.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex min-h-[44px] items-center text-[11px] text-[var(--color-accent-text)] underline decoration-[var(--color-edge)] underline-offset-2 hover:decoration-[var(--color-accent-text)] sm:min-h-0"
+          >
+            {link.label} ↗
+          </a>
+        ))}
       </div>
     </div>
   );

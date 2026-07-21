@@ -239,12 +239,22 @@ describe("demo chrome wiring contracts", () => {
     expect(tour).toContain("sessionStorage");
   });
 
-  it("the banner reads as an honest system label and carries the v1 CTA (GitHub only) + Replay tour", () => {
+  it("the banner reads as an honest system label and carries the 3-link CTA (CV/GitHub/LinkedIn) + Replay tour", () => {
     expect(banner).toContain("Demo · Fictional seed data · Resets nightly");
-    expect(banner).toContain("https://github.com/simon42simon");
     expect(banner).toContain("Replay tour");
-    // v1 CTA is GitHub ONLY (owner decision): no LinkedIn/CV links rendered.
-    expect(banner).not.toMatch(/href="[^"]*linkedin/i);
+    // SIM-423: the demo spec (§4/AC7) calls for all three - GitHub-only was the
+    // v1 owner decision, now superseded. Both components share ONE list
+    // (src/lib/demoLinks.ts) so they can never drift apart.
+    expect(banner).toContain("DEMO_CTA_LINKS");
+    const links = read("../src/lib/demoLinks.ts");
+    expect(links).toContain("https://github.com/simon42simon");
+    expect(links).toMatch(/label: "CV"/);
+    expect(links).toMatch(/label: "GitHub"/);
+    expect(links).toMatch(/label: "LinkedIn"/);
+  });
+
+  it("the tour's close panel renders the SAME 3-link CTA as the banner (AC7)", () => {
+    expect(tour).toContain("DEMO_CTA_LINKS");
   });
 
   it("the live anchors exist on the real components", () => {

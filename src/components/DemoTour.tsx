@@ -9,6 +9,7 @@ import {
   type TourMemory,
   type TourStep,
 } from "../lib/demoTour";
+import { DEMO_CTA_LINKS } from "../lib/demoLinks";
 
 // The demo-mode guided tour (RC-4 / SIM-88): a non-blocking first-run choice,
 // three dismissible spotlight callouts anchored to LIVE elements, and a close
@@ -322,15 +323,23 @@ export function DemoTour({
           </button>
         </div>
         {/* The CTA also lives in the always-visible banner (AC7) - repeated
-            here because the close panel is where an earned click happens. */}
-        <a
-          href="https://github.com/simon42simon"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="mt-2 inline-flex min-h-[44px] items-center text-[11px] text-[var(--color-accent-text)] underline decoration-[var(--color-edge)] underline-offset-2 hover:decoration-[var(--color-accent-text)] sm:min-h-0"
-        >
-          Built by Simon Kim · GitHub ↗
-        </a>
+            here because the close panel is where an earned click happens.
+            SIM-423: CV + GitHub + LinkedIn, same shared list the banner
+            renders (src/lib/demoLinks.ts), so the two can never drift apart. */}
+        <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="text-[11px] text-[var(--color-muted)]">Built by Simon Kim ·</span>
+          {DEMO_CTA_LINKS.map((link) => (
+            <a
+              key={link.label}
+              href={link.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-h-[44px] items-center text-[11px] text-[var(--color-accent-text)] underline decoration-[var(--color-edge)] underline-offset-2 hover:decoration-[var(--color-accent-text)] sm:min-h-0"
+            >
+              {link.label} ↗
+            </a>
+          ))}
+        </div>
       </section>
     );
   }
