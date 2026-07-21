@@ -83,6 +83,48 @@ describe("demo seed determinism", () => {
     expect(ds.jobs.some((j) => j.status === "queued")).toBe(true);
     expect(ds.jobs.some((j) => j.status === "drafted")).toBe(true);
   });
+
+  // SIM-424: "Finalized application" used to be able to land AFTER "Applied"
+  // (sometimes even after the anchor day) because the run schedule and the
+  // applied date were computed independently. Pin the fix on EVERY job that
+  // carries both, not just Hero A - the same uncorrelated-counter bug hit the
+  // other hero/rejected jobs too, just unnoticed.
+  it("every job's finalize-job run lands BEFORE its applied date, and (when both exist) draft before finalize (SIM-424)", () => {
+    const ds = generate(1);
+    const withApplied = ds.jobs.filter((j) => j.applied);
+    expect(withApplied.length).toBeGreaterThanOrEqual(3); // enough jobs to be a real spot-check, not a fluke
+    for (const j of withApplied) {
+      const finalizeDone = ds.activity.find(
+        (a) => a.jobId === j.id && a.routine === "finalize-job" && a.status === "done",
+      );
+      expect(finalizeDone, `job ${j.id} has an applied date but no finalize-job run`).toBeTruthy();
+      expect(finalizeDone.ts.slice(0, 10) <= j.applied, `${j.id}: finalize ${finalizeDone.ts} vs applied ${j.applied}`).toBe(
+        true,
+      );
+      const draftDone = ds.activity.find(
+        (a) => a.jobId === j.id && a.routine === "first-draft-job" && a.status === "done",
+      );
+      if (draftDone) {
+        expect(draftDone.ts < finalizeDone.ts, `${j.id}: draft ${draftDone.ts} vs finalize ${finalizeDone.ts}`).toBe(true);
+      }
+    }
+    // Hero A specifically (the job QA's repro named): an interview-status job.
+    const heroA = ds.jobs.find((j) => j.status === "interview");
+    expect(heroA.applied).toBeTruthy();
+  });
+
+  // Every activity date must be in the PAST relative to the anchor - the old
+  // uncorrelated-counter formula could push a later-processed job's run date
+  // past the anchor (a "finalize" dated tomorrow), which is what actually
+  // produced the "finalize after applied" symptom on Hero A.
+  it("no seeded run activity lands after the anchor day, hermetic or refDate-anchored (SIM-424)", () => {
+    for (const ds of [generate(1), generate(1, { refDate: new Date("2026-07-21") })]) {
+      const anchorEndMs = Date.parse(ds.anchor + "T23:59:59.999Z");
+      for (const a of ds.activity) {
+        expect(Date.parse(a.ts), `${a.jobId} ${a.routine} ${a.status} at ${a.ts}`).toBeLessThanOrEqual(anchorEndMs);
+      }
+    }
+  });
 });
 
 // SIM-390 item 5 - the discovery/velocity texture (journey-spec 3.3/3.4) and the
