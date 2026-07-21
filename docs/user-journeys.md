@@ -111,7 +111,7 @@ re-deriving; do not restate the mechanism here).
 | J1 | Report a bug/idea via the chatbot -> triaged ticket | [cloud-release] | `ChatCapture` FAB (global) |
 | J2 | Track a job through its lifecycle (Board + Table) | [cloud-release] | Jobs view |
 | J3 | Open a job's detail + trigger agent actions (Draft/Finalize/etc.) | [cloud-release] | Job detail drawer + Run/Batch panels |
-| J4 | Ask about this job (read-only per-job assistant) | [cloud-release, currently broken on staging - see finding] | Job detail drawer -> `JobChat` |
+| J4 | Ask about this job (read-only per-job assistant) | [cloud-release; honest disabled state on demo/hosted - SIM-425 fixed] | Job detail drawer -> `JobChat` |
 | J5 | Discover and pursue a new posting | [cloud-release] | Discovery view (Sources <-> Finds) |
 | J6 | Notifications | [cloud-release, with a caveat - see finding] | TopBar bell |
 | J7 | Read the Insights view | [cloud-release] | Insights tab |
@@ -286,21 +286,19 @@ It can suggest a rerun or a fix - you confirm it. It never edits or sends anythi
   `finalize-job`, `merge-application-pdf`, `interview-prep`, `interview-prep-refine`,
   `offer-prep`, `draft-follow-up`) - anything else it writes is dropped, not surfaced as a button.
 
-**On staging (demo mode) - KNOWN DIVERGENCE, filed as a finding, not fixed in this pass.**
-Unlike J3's routine-run path, `POST /api/jobs/:id/chat` has **no `APP_MODE` gate at all** -
-`runReadOnlyAssistant` (`server/index.js` lines 3771-3812) unconditionally spawns the `claude`
-binary in every mode, demo included. The deployed container has no such binary (`Dockerfile` never
-installs a Claude CLI or sets an Anthropic key), so on staging - and on any hosted instance -
-sending a message is expected to return a plain `500 {"error": "..."}` (the route's own catch
-block, not a crash, so CC-ERR technically still holds) rather than a real reply. This also reads
-as a live contradiction of `docs/data-schema.md` §7.0's disclosure ("No Anthropic key, no
-`claude.exe`, no agent execution on the cloud instance") and of the same file's own inline design
-comment on the sibling routine-run path ("DEMO MODE (design 5.2): never spawn claude.exe"), which
-this second agent-spawn path was apparently never wired to. **QA action on staging:** confirm the
-500 (or a working reply, if the deployment has since changed), and treat AC-J4-2/3 as **N/A on
-staging** either way until this is resolved - it is a product/engineering call (add a demo-mode
-canned-reply branch, gate the feature off entirely in hosted modes, or bundle a CLI), not a docs
-fix.
+**On staging (demo mode) - FIXED (SIM-425, GATE 2).** `POST /api/jobs/:id/chat` now mirrors J3's
+routine-run `DEMO_MODE` gate: on `APP_MODE=demo` / any hosted instance, the route returns early
+with `200 { disabled: true, reason: "The live assistant is turned off in the hosted demo.",
+messages: <transcript, unchanged> }` and never spawns `claude` - no 500, and no invented reply is
+appended to the stored transcript (a demo visitor's message is never silently absorbed into a fake
+conversation). Client-side, `JobChat` (`src/components/JobChat.tsx`) receives a `demoMode` prop
+(`config?.appMode === "demo"`, threaded from `JobDetailDrawer`) and renders an honest disabled
+state instead of a working compose box: the textarea and Send button are disabled, the placeholder
+reads "Assistant unavailable in the hosted demo," and a status line above the transcript reads "The
+live assistant is turned off in the hosted demo." **AC-J4-2/3 are N/A in demo mode by design** (no
+message can be sent, so nothing to append or recommend); AC-J4-1 and AC-J4-4 are unaffected (the
+panel is still reachable and shows any seeded transcript; the allowlist logic is untouched real-mode
+code). Real mode (`APP_MODE` unset/"real") is byte-identical to before this fix.
 
 ---
 
@@ -358,24 +356,25 @@ calls `openDecisions()` -> `openSscHub("decisions")` (`src/App.tsx` lines 214-21
 - [ ] AC-J6-3 Clicking "Review decisions" fires the SSC-hub handoff (see the finding below for
   what "fires" means on a hosted instance).
 
-**On staging (demo mode) - KNOWN DIVERGENCE, filed as a finding.** `demoMode` gates the TopBar
-**Product tab** specifically (a documented fix, "QA BUG-3," `src/App.tsx` lines 255-262 and
-`src/components/TopBar.tsx` lines 68-72: "on the PUBLIC demo that is a dead link and an
-internal-infra leak, so demo mode hides the tab"). The **same class of dead link** is NOT gated
-anywhere else: `openEntity`/`openDecisions` (`src/App.tsx` lines 210-218), which back this bell's
-"Review decisions" banner AND every related-entity chip in `RunPanel`/`ChatCapture`
-(J1's "Related" chips), call `openSscHub(...)` unconditionally in every mode - demo, private
-cloud, and local dev alike. `SSC_HUB_URL = "http://localhost:5185"` is hardcoded
-(`src/lib/sscHub.ts`); it can only ever resolve for someone running the companion SSC Product Hub
-on the SAME machine that opened the browser tab - i.e., Simon on his own laptop against local dev.
-On staging, and on any hosted private instance, a QA tester or the owner clicking "Review
-decisions" or a "Related" chip opens (or fails silently to open) `localhost:5185` on **their own**
-machine, not the server's - the identical dead-link/infra-leak failure mode BUG-3 was written to
-prevent, reached through two doors BUG-3 did not cover. **QA action:** exercise AC-J6-3 on
-staging expecting a dead/blank window, and treat that as expected-per-this-finding, not a new bug
-to file separately - the underlying fix (gate `openEntity`/`openDecisions` the same way the
-Product tab is gated, or make the target configurable per deployment) is a product call, not made
-in this docs pass.
+**On staging (demo mode) - FIXED (SIM-426, GATE 2).** `demoMode` already gated the TopBar
+**Product tab** specifically ("QA BUG-3," `src/App.tsx`/`src/components/TopBar.tsx`), but the
+**same class of dead link** reached through two OTHER doors: `openEntity`/`openDecisions`
+(`src/App.tsx`, backing this bell's "Review decisions" banner AND every related-entity chip in
+`RunPanel`/`ChatCapture`) and `ProductMoved`'s CTA, all via the hardcoded
+`SSC_HUB_URL = "http://localhost:5185"` in `src/lib/sscHub.ts` - resolvable only on the SAME
+machine as the companion SSC Product Hub process (Simon's own laptop against local dev), so every
+hosted instance (staging demo AND any private hosted instance - both pg-backed) rendered a dead
+`localhost:5185` link. Fixed by making the target **config-driven**: `GET /api/config` now
+declares `sscHubUrl` (null on every pg-backed instance, `http://localhost:5185`-or-env-override on
+the file-backed local instance - the same signal the `sse` field already uses for the identical
+local-vs-hosted split). `openSscHub`/`sscHubUrl` (`src/lib/sscHub.ts`) take that resolved base as
+an explicit param and hard no-op on null; `openEntity`/`openDecisions` pass `config?.sscHubUrl`
+through, and `ProductMoved` renders an honest "isn't reachable from here" line instead of the CTA
+when there is no hub to link to. **AC-J6-3 on staging now expects the "Review decisions" click to
+silently no-op** (no window opens, no localhost URL is ever constructed) rather than a dead/blank
+window - the banner and unread badge themselves are unaffected (that count is real board data,
+independent of the hub link). Real (file-backed) mode is unaffected - it keeps resolving
+`http://localhost:5185` exactly as before.
 
 ---
 
@@ -491,23 +490,18 @@ never "no demo." On staging, walk the tour using the frozen spec's own script, n
 Per the lane constraints for this session (docs-only; a mismatch needing a CODE fix is filed, not
 fixed), the following are handed back rather than patched:
 
-1. **J4 - "Ask about this job" has no demo-mode/hosted gate and is expected to 500 on staging.**
-   `runReadOnlyAssistant` (`server/index.js` ~3771-3812) spawns the `claude` CLI unconditionally in
-   every `APP_MODE`, unlike the sibling routine-run path which explicitly never does in demo mode
-   (line 3308's comment: "DEMO MODE (design 5.2): never spawn claude.exe"). No Claude CLI is
-   installed in the deployed image (`Dockerfile`). This also contradicts `docs/data-schema.md`
-   §7.0's disclosure ("No Anthropic key, no `claude.exe`, no agent execution on the cloud
-   instance"). Needs an owner/architect decision: add a demo-mode canned-reply branch (mirroring
-   `runDemoReplay`), gate the feature off on any hosted deployment, or provision a CLI + key on the
-   private instance and update the §7.0 disclosure to match.
-2. **SSC-Hub deep links are laptop-only and ungated everywhere except the one tab BUG-3 already
-   fixed.** `openEntity`/`openDecisions` (`src/App.tsx` 210-218, backing the notification bell's
-   "Review decisions" banner and every related-entity chip in `RunPanel`/`ChatCapture`) call
-   `openSscHub(...)` -> a hardcoded `http://localhost:5185` - in every mode, with no `demoMode` (or
-   any hosted-mode) check. This is the same dead-link/internal-infra-leak class of bug the Product
-   tab was explicitly gated to prevent ("QA BUG-3," `TopBar.tsx` lines 68-72), reached through two
-   doors that fix did not close. Affects staging, any private hosted instance, and local dev
-   whenever the SSC Hub process is not also running on the same machine.
+1. ~~**J4 - "Ask about this job" has no demo-mode/hosted gate and is expected to 500 on staging.**~~
+   **FIXED (SIM-425, GATE 2).** See the "On staging (demo mode)" note under J4 above: the server
+   route now gates on `DEMO_MODE` (mirroring `runDemoReplay`'s sibling gate) and returns an honest
+   disabled response instead of spawning `claude`; the client renders a disabled compose state. No
+   change was needed to `docs/data-schema.md` §7.0 - its disclosure was already accurate, this fix
+   just makes the chat route honor it.
+2. ~~**SSC-Hub deep links are laptop-only and ungated everywhere except the one tab BUG-3 already
+   fixed.**~~ **FIXED (SIM-426, GATE 2).** See the "On staging (demo mode)" note under J6 above:
+   the hub base is now server-declared config (`GET /api/config` -> `sscHubUrl`, null on every
+   pg-backed/hosted instance), threaded explicitly through `openSscHub`/`sscHubUrl`
+   (`src/lib/sscHub.ts`) and into `openEntity`/`openDecisions`/`ProductMoved` - no localhost URL is
+   ever constructed on a hosted instance, closing both doors BUG-3's Product-tab fix left open.
 3. **This document's own upkeep is not yet wired into the release checklist.** `DEPLOYMENT.md`
    "Cutting a release" (root file, out of this lane's `docs/` write fence) does not mention this
    charter. See MAINTENANCE below for the intended discipline; wiring it into the actual release
