@@ -94,3 +94,49 @@ export function allTranscriptText() {
     })
     .join("\n");
 }
+
+// SIM-422 (GATE 2 fix). demo/seed.mjs pre-bakes fictional CV + cover-letter
+// artifacts for jobs it seeds past "queued" (see its `artifacts` builder), but a
+// job the visitor pushes through "Draft CV + cover letter" via a LIVE
+// first-draft-job replay started with none: the run panel said DONE, the
+// transcript above says "ready for review," but the drawer's FILES section
+// stayed empty and the status never advanced (the store's readiness derivation
+// needs a real cv/cover file - see hasCV/hasCoverLetter in server/store.js -
+// before draftDone, and therefore nextStatusAfterRun, can flip). This mirrors
+// the SAME fictional-artifact shape the seed bakes (same %PDF-1.4 placeholder
+// header + FICTIONAL DEMO markers, so it passes the forbidden-substrings guard
+// (MF-11) exactly like the seeded ones - both are pure functions of fictional
+// inputs, never real vault data) so the replay attaches real files instead of
+// only promising them. DEMO_APPLICANT_NAME is a fixed, clearly-invented persona
+// name (not a real person) so every replay of a given job is idempotent
+// (upserts the same two file names on re-draft rather than piling up copies).
+const DEMO_APPLICANT_NAME = "Jordan Ashworth";
+
+export function fictionalDraftArtifacts({ role, employer, jobId } = {}) {
+  const r = role || "the role";
+  const e = employer || "the employer";
+  const person = DEMO_APPLICANT_NAME;
+  // Cosmetic-only variability (bullet numbers) keyed off the job id so different
+  // jobs don't render byte-identical CVs; never affects file naming or content shape.
+  let seed = 0;
+  for (const ch of String(jobId || r)) seed = (seed + ch.charCodeAt(0)) % 97;
+  return [
+    {
+      name: `${person} - CV - ${r}.pdf`,
+      mime: "application/pdf",
+      text:
+        `%PDF-1.4 (fictional demo)\n# ${person}\n\n## ${r} - ${e} (FICTIONAL DEMO)\n\n` +
+        `- Led a cross-functional team of ${3 + (seed % 5)} at a fictional prior employer.\n` +
+        `- Improved a made-up metric by ${10 + (seed % 40)}%.\n\n` +
+        `_This is invented sample data for the public demo; no real person or record._\n`,
+    },
+    {
+      name: `${person} - Cover Letter - ${e}.pdf`,
+      mime: "application/pdf",
+      text:
+        `%PDF-1.4 (fictional demo)\nDear Hiring Team at ${e},\n\n` +
+        `I am excited to apply for the ${r} role. This letter is fictional demo content.\n\n` +
+        `Sincerely,\n${person}\n`,
+    },
+  ];
+}
