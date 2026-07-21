@@ -552,9 +552,14 @@ export function installAuthRoutes(app, auth, env = process.env, { store = null, 
 // Gate: 401 any /api/* request without a valid session, except the open auth
 // paths. Non-/api requests (the static SPA shell + hashed assets) always pass so
 // the login screen can render.
+// SIM-466: default-deny on case - matched case-insensitively against the /api/
+// prefix so a case-variant path (e.g. /API/config) is recognized as an API
+// request and gated (401) rather than slipping through as "not an API path"
+// while index.js's now-case-sensitive routing (app.set) keeps it off the real
+// handler.
 export function createAuthGate(auth) {
   return function authGate(req, res, next) {
-    if (!req.path.startsWith("/api/")) return next();
+    if (!req.path.toLowerCase().startsWith("/api/")) return next();
     if (isAuthOpenPath(req.path)) return next();
     const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     if (verifySession(auth.secret, token)) return next();

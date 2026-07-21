@@ -299,6 +299,15 @@ if (runtime.storeBackend === "pg") {
 
 // ---- app ------------------------------------------------------------------
 const app = express();
+// SIM-466: Express's default (case-insensitive) route matching let a
+// case-variant path (GET /API/config) skip the auth gate's own
+// req.path.startsWith("/api/") check yet still match the lowercase-registered
+// handler, reaching real data with no session - a live anonymous-read bypass
+// (guardian finding 2026-07-21, twin of the SSC hub fix at 5b81e6a). Forcing
+// exact-case route matching closes the handler side; createAuthGate's own
+// case-insensitive prefix check (server/auth.js) closes the gate side so a
+// case-variant /api/* path is denied (401) rather than merely 404ing.
+app.set("case sensitive routing", true);
 // NO CORS middleware - deliberate (t-1783186106119). app.use(cors()) used to
 // emit Access-Control-Allow-Origin: * on every response, letting ANY page in
 // the owner's browser read this vault API (and preflight into its writes)

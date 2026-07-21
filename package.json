@@ -1,7 +1,7 @@
 {
   "name": "jobhunt-cloud",
   "private": true,
-  "version": "0.38.2",
+  "version": "0.38.3",
   "type": "module",
   "description": "An AI-assisted job-hunt command center: a local-first pipeline (discover -> tailor -> track -> interview) with a pluggable storage seam (files locally, Postgres in the cloud) and a demo mode seeded with fictional data.",
   "scripts": {
