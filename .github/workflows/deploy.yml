@@ -1,31 +1,59 @@
 name: deploy
 
-# RC-3 / SIM-87 I8 - build the container image on a version tag and (STAGED) deploy
-# it to Railway. This wiring is PREPARED, not yet live: the job is gated on the
-# `DEPLOY_ENABLED` repo variable, so it is a no-op until the owner flips it on at
-# actual deploy time (RC-2/RC-4). The Railway step is additionally gated on the
-# RAILWAY_TOKEN secret, so it never fails a run where the secret is unset.
+# cc-staging (SIM-403, RFC v2-010 S1): the dev -> staging -> production lane.
 #
-# NOTE (build context): ssc-ui is vendored into ./ssc-ui in this repo (a prebuilt
-# dist + a minimal package.json), so `file:./ssc-ui` resolves with no extra checkout
-# and `docker build` needs only this repo as its context.
+# Build the versioned image ONCE on a `v*` tag, deploy it to the STAGING Railway
+# environment, then promote the SAME image tag to PRODUCTION via a gated manual
+# step. Same tag, no rebuild - the artifact approved on staging is byte-for-byte
+# the artifact that goes live (the repo's "one image, three deployments by env"
+# design, Dockerfile header / design section 6).
+#
+# GATES:
+#   - vars.DEPLOY_ENABLED == 'true'   -> the whole pipeline is a no-op until the
+#     owner flips this repo variable on. Unset/false = nothing deploys.
+#   - secrets.RAILWAY_TOKEN           -> the Railway steps skip cleanly if unset,
+#     so a run never hard-fails on a missing secret.
+#   - environment: production         -> the GitHub `production` Environment's
+#     required-reviewer rule IS the go-live gate. Configure Simon as the required
+#     reviewer; the promote job then pauses for his approval (the go-live GO).
+#     The guardian data-isolation review + the QA scorecard run BEFORE that
+#     approval, per company-os/docs/sop-release-promotion.md.
+#
+# RAILWAY TARGETING IS CONFIG, NOT HARDCODED (so it matches the owner's real
+# Railway topology without a code change):
+#   - vars.RAILWAY_SERVICE          (default 'jobhunt-cloud')
+#   - vars.RAILWAY_STAGING_ENV      (default 'staging')
+#   - vars.RAILWAY_PRODUCTION_ENV   (default 'production')
+# The exact `railway` CLI invocation is verified in-session against the live
+# environment during the first release-candidate travel (SIM-403 DoD); the flow
+# above is the fixed part.
+#
+# BUILD CONTEXT NOTE: ssc-ui is vendored into ./ssc-ui in this repo (prebuilt dist
+# + minimal package.json), so `docker build` needs only this repo as its context.
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      promote_tag:
+        description: "Existing vX.Y.Z tag to promote from staging to PRODUCTION (same image, no rebuild)"
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
-  build-and-deploy:
-    # STAGED: skipped until the owner sets the DEPLOY_ENABLED repo variable to 'true'.
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+  # ---- 1) build ONCE + deploy to STAGING (automatic on a v* tag) ------------
+  build-and-stage:
+    if: ${{ github.event_name == 'push' && vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    environment: staging
     env:
-      IMAGE: ghcr.io/${{ github.repository }}
-      # Job-level env indirection: the `secrets` context is not available in a
-      # step-level `if` (GitHub rejects the whole workflow file), but `env` is.
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
     steps:
       - name: Checkout app
@@ -41,21 +69,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push image
+      # Build the versioned image ONCE. It is NOT tagged `latest` on purpose:
+      # promotion targets this exact immutable tag, never a moving pointer.
+      - name: Build and push image (once)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ github.ref_name }}
-            ${{ env.IMAGE }}:latest
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
 
-      # ---- STAGED Railway deploy (runs only when RAILWAY_TOKEN is configured) ----
-      - name: Deploy to Railway
+      - name: Deploy image to STAGING
         if: ${{ env.RAILWAY_TOKEN != '' }}
         run: |
-          echo "Deploying ${{ env.IMAGE }}:${{ github.ref_name }} to Railway"
+          echo "Deploying ${{ env.IMAGE }}:${{ github.ref_name }} to Railway (staging)"
           npm i -g @railway/cli
-          # The service is configured to deploy the pushed image tag; `railway up`
-          # / `railway redeploy` is wired here at actual deploy time (RC-2/RC-4).
-          railway redeploy --yes || echo "railway redeploy not yet configured (staged)"
+          railway redeploy --yes \
+            --service "${{ vars.RAILWAY_SERVICE || 'jobhunt-cloud' }}" \
+            --environment "${{ vars.RAILWAY_STAGING_ENV || 'staging' }}" \
+            || echo "staging redeploy not yet configured (verify the CLI target in-session, SIM-403)"
+
+  # ---- 2) promote the SAME image tag to PRODUCTION (gated: the go-live GO) --
+  # Triggered manually AFTER the guardian review is GREEN and the QA scorecard
+  # passes on staging. The `production` Environment's required reviewer (Simon)
+  # is the human GO. No rebuild: prod pulls the same GHCR tag staging validated.
+  promote-production:
+    if: ${{ github.event_name == 'workflow_dispatch' && vars.DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    steps:
+      - name: Promote ${{ inputs.promote_tag }} to production (no rebuild)
+        if: ${{ env.RAILWAY_TOKEN != '' }}
+        run: |
+          echo "Promoting ${{ env.IMAGE }}:${{ inputs.promote_tag }} to Railway (production) - same image, no rebuild"
+          npm i -g @railway/cli
+          railway redeploy --yes \
+            --service "${{ vars.RAILWAY_SERVICE || 'jobhunt-cloud' }}" \
+            --environment "${{ vars.RAILWAY_PRODUCTION_ENV || 'production' }}" \
+            || echo "production redeploy not yet configured (verify the CLI target in-session, SIM-403)"
