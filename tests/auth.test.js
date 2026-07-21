@@ -326,6 +326,20 @@ describe("auth ON (JOBHUNT_AUTH_HASH set)", () => {
     const res = await request(app).get("/api/config").set("Cookie", `${SESSION_COOKIE}=${forged}`);
     expect(res.status).toBe(401);
   });
+
+  // SIM-466: Express matches routes case-insensitively by default, so a
+  // case-variant path (GET /API/config) used to slip past the gate's own
+  // req.path.startsWith("/api/") check (false on "/API/config") while still
+  // reaching the lowercase-registered handler - an anonymous-read bypass, LIVE.
+  // Red-checked: reverting either half of the fix (index.js's
+  // app.set("case sensitive routing", true) or auth.js's case-insensitive
+  // gate check) makes this assert 200 (data leak) or 404 (gate silently
+  // skipped) instead of 401.
+  it("SIM-466: a case-variant /api path (/API/config) is gated (401), not leaked", async () => {
+    const res = await request(app).get("/API/config");
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: "authentication required" });
+  });
 });
 
 // ---------------------------------------------------------------------------
