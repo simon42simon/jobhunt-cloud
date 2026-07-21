@@ -1,14 +1,28 @@
 # Deployment & release process
 
-This app is **local-first and single-user**: it runs on your machine and reads/writes your local vault. There is no cloud "production server," so the classic staging/production split maps to git, not to hosted environments. What follows is the right-sized process.
+This app runs in **two modes**: (1) **local-first, single-user** on your machine against your vault, and (2) **hosted on Railway** (RFC v2-008) — a private instance with real data behind auth, and a public demo with fictional seed data. The same image serves all of them, differentiated only by env (Dockerfile header / design §6). Since **cc-staging** (SIM-403, RFC v2-010 S1) the hosted path has a real **dev → staging → production** lane; the local path keeps its lighter git-mapped process below.
 
 ## Environments (mapped to reality)
 
 | Classic term | Here |
 | --- | --- |
 | Local dev | `npm run dev` on your machine - Vite UI on `:5180`, Express file-bridge on `:8787`. One process, owned by the main session; do not run a second. |
-| Staging | A git branch (or worktree) where a change is built and `npm run check` is run before it reaches `main`. |
-| Production | `main` + the latest `vX.Y.Z` tag - the version you run daily. |
+| Local "staging" | A git branch (or worktree) where a change is built and `npm run check` is run before it reaches `main`. |
+| **Cloud staging** | A Railway `staging` environment running the SAME image with **seeded fictional data only** (never real data — guardian-gated, G9), auth on, scale-to-zero. A `v*` tag auto-deploys here first (`.github/workflows/deploy.yml`). |
+| Production (local) | `main` + the latest `vX.Y.Z` tag - the version you run daily on your machine. |
+| **Production (cloud)** | The Railway `production` environment. Reached ONLY by promoting the same image tag that passed cloud staging — no rebuild. Gated by the `production` GitHub Environment's required-reviewer (the go-live GO). |
+
+## Cloud release lane (dev → staging → production, same-tag)
+
+The full standing SOP is **`company-os/docs/sop-release-promotion.md`**. In brief:
+
+1. `npm run check` green (unchanged dev gate) → cut a `vX.Y.Z` tag.
+2. The tag auto-builds the image once and deploys it to the **staging** Railway environment (`deploy.yml` → `build-and-stage`, gated on the `DEPLOY_ENABLED` variable + `RAILWAY_TOKEN` secret).
+3. Guardian `/security-review` of real-data isolation is GREEN in writing; the qa-tester walks the release journeys against the staging URL and fills the QA scorecard.
+4. On a clean pass, run the **deploy** workflow's `workflow_dispatch` with the tag to promote → the `production` Environment pauses for the owner's approval (the go-live GO) → the SAME image tag deploys to production. No rebuild.
+5. Verify the production surface is healthy.
+
+Rollback = promote a previous tag (every release is an immutable image tag).
 
 ## The gate
 
