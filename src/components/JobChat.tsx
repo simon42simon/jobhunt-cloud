@@ -20,12 +20,20 @@ const ROUTINE_LABEL: Record<string, string> = {
 // assistant is READ-ONLY server-side; when it recommends a guarded action, the
 // "Run this" button routes through onRunSuggested, which reuses the SAME guarded
 // path (confirm modal / direct run) as the action buttons - the human confirms.
+//
+// SIM-425: on demo/hosted the assistant is a `claude` CLI spawn that does not
+// exist in the deployed image, so it is gated off entirely - server-side (the
+// POST route returns an honest disabled response instead of spawning it) and
+// here client-side (a visitor never sees a working compose box to begin with).
+// `demoMode` mirrors DemoBanner/DemoTour's own appMode === "demo" check.
 export function JobChat({
   jobId,
   onRunSuggested,
+  demoMode = false,
 }: {
   jobId: string;
   onRunSuggested: (routine: string) => void;
+  demoMode?: boolean;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -52,7 +60,7 @@ export function JobChat({
 
   async function send() {
     const text = input.trim();
-    if (!text || sending) return;
+    if (!text || sending || demoMode) return; // demo: no compose box reaches here, but guard anyway
     setErr(null);
     setSending(true);
     // Optimistic user bubble so the input clears and the message shows instantly.
@@ -60,7 +68,10 @@ export function JobChat({
     setInput("");
     try {
       const r = await api.postJobChat(jobId, text);
-      setMessages(r.messages); // server returns the authoritative transcript
+      // SIM-425: a disabled response (demo/hosted) carries the transcript
+      // UNCHANGED, no fake reply - drop the optimistic bubble back to what the
+      // server actually holds rather than leaving an unanswered user message.
+      setMessages(r.messages);
     } catch (e) {
       setErr(String((e as Error).message || e));
     } finally {
@@ -85,6 +96,14 @@ export function JobChat({
         A read-only assistant that answers from this job's files. It can suggest a rerun or a fix - you
         confirm it. It never edits or sends anything.
       </p>
+      {demoMode && (
+        <p
+          role="status"
+          className="mb-2.5 rounded-md border border-[var(--color-edge)] bg-[var(--color-panel-2)] px-3 py-2 text-[12px] leading-relaxed text-[#7a869d]"
+        >
+          The live assistant is turned off in the hosted demo.
+        </p>
+      )}
       <div ref={listRef} className="mb-2 flex max-h-[320px] flex-col gap-2 overflow-y-auto">
         {loaded && messages.length === 0 && (
           <p className="text-[12px] text-[#7a869d]">
@@ -126,14 +145,16 @@ export function JobChat({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Ask about this job, or say what to fix..."
+          placeholder={demoMode ? "Assistant unavailable in the hosted demo" : "Ask about this job, or say what to fix..."}
           rows={2}
           className="flex-1 px-3 py-2 text-[13px]"
           aria-label="Message the job assistant"
+          disabled={demoMode}
         />
         <button
           onClick={send}
-          disabled={sending || !input.trim()}
+          disabled={demoMode || sending || !input.trim()}
+          aria-disabled={demoMode || sending || !input.trim()}
           className="min-h-[44px] rounded-md border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-50 sm:min-h-0"
         >
           Send

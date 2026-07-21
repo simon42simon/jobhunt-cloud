@@ -128,10 +128,16 @@ export function generate(seedVersion = 1, { refDate = null } = {}) {
     // Fit skews strong/moderate near the top of the funnel (a real user doesn't
     // queue jobs they don't fit); one deliberate stretch lands via the rng tail.
     const fit = ["lead", "queued"].includes(status) ? pick(rng, ["strong", "strong", "moderate"]) : pick(rng, FITS);
-    // Applied dates spread across the last ~2.5 weeks (1/6/11/16 days before the
-    // anchor) so the Insights velocity chart shows movement in the CURRENT weeks
-    // instead of stalling two-plus weeks back (SIM-390 item 5 / journey-spec 3.3).
-    const applied = ["submitted", "interview", "offer", "rejected"].includes(status) ? dateStamp(1 + (i % 4) * 5) : null;
+    // Applied dates spread across the last ~2.5 weeks so the Insights velocity
+    // chart shows movement in the CURRENT weeks instead of stalling two-plus
+    // weeks back (SIM-390 item 5 / journey-spec 3.3). SIM-424: the actual value
+    // is backfilled below (in the activity-history pass), derived from this
+    // SAME job's own finalize-job run date - it used to be computed here from
+    // `i` (this loop's funnel index), independently of the finalize run date
+    // computed later from an unrelated running counter, so the two could
+    // invert ("Finalized application" landing AFTER "Applied", occasionally
+    // even after the anchor day). null here is a placeholder for "needs one".
+    const applied = null;
     // Pre-baked FICTIONAL artifacts for jobs that have progressed far enough.
     const person = `${pick(rng, FIRST_NAMES)} ${pick(rng, LAST_NAMES)}`;
     const artifacts = [];
@@ -333,6 +339,23 @@ export function generate(seedVersion = 1, { refDate = null } = {}) {
 
   // A believable activity history: a start+done pair per artifact-bearing job, so
   // the run panel + insights render a live-looking timeline.
+  //
+  // SIM-424: dates are scheduled per GROUP (hero-treatment vs solo) off a small
+  // bounded index, not a single global monotonic counter subtracted from a
+  // fixed ceiling. The old `18/12/15 - runN` scheme used ONE counter shared by
+  // every artifact-bearing job (13 of them, 20 pushes total) - by the time it
+  // reached the later jobs in funnel order (interview, offer, rejected),
+  // `12 - runN` and `15 - runN` had gone NEGATIVE, i.e. `dayISO` landed AFTER
+  // the anchor day (a "finalize" run dated into the future). Meanwhile
+  // `applied` was computed separately from `i` (the funnel-position index),
+  // uncorrelated with the run schedule - so on Hero A (and, unnoticed until
+  // now, the other later hero/rejected jobs) "Finalized application" could
+  // land after "Applied", sometimes by a lot. Fixed two ways: (1) each job's
+  // run date now comes from its own small per-group index against a fixed
+  // ceiling well clear of zero, so it can never go negative; (2) `applied`
+  // (backfilled here, was `null` above) is derived from THIS SAME job's own
+  // finalize-job date, a fixed 2-day gap later, so the timeline always reads
+  // draft -> finalize -> apply, in that order, on every job that carries one.
   const activity = [];
   let runN = 0;
   const pushRun = (job, routine, daysAgo) => {
@@ -342,16 +365,32 @@ export function generate(seedVersion = 1, { refDate = null } = {}) {
     activity.push({ ts: startTs, kind: "run", runId, routine, label: routine, jobId: job.id, batchId: null, status: "running" });
     activity.push({ ts: doneTs, kind: "run", runId, routine, label: routine, jobId: job.id, batchId: null, status: "done", exitCode: 0 });
   };
+  let heroIdx = 0; // hero (draft+finalize) treatment: submitted/interview/offer - 7 max
+  let soloIdx = 0; // single-run treatment: drafted/ready/rejected - 6 max
   for (const j of jobs) {
     if (!j.artifacts.length) continue;
     // Hero A treatment (spec 3.2): far-along jobs carry the FULL plausible run
     // history (draft then finalize, days apart) so the drawer's activity log and
     // the Insights view read as a system in daily use, not a single event.
+    // Bounded schedule (7 hero jobs max): draft 24..12 days ago (2-day steps,
+    // always positive), a fixed 6-day draft->finalize gap, then (every hero
+    // status carries an applied date) a fixed 2-day finalize->apply gap.
     if (["interview", "offer", "submitted"].includes(j.status)) {
-      pushRun(j, "first-draft-job", 18 - runN);
-      pushRun(j, "finalize-job", 12 - runN);
+      const draftDaysAgo = 24 - heroIdx * 2;
+      const finalizeDaysAgo = draftDaysAgo - 6;
+      pushRun(j, "first-draft-job", draftDaysAgo);
+      pushRun(j, "finalize-job", finalizeDaysAgo);
+      j.applied = dateStamp(finalizeDaysAgo - 2);
+      heroIdx++;
     } else {
-      pushRun(j, j.status === "drafted" ? "first-draft-job" : "finalize-job", 15 - runN);
+      // Solo treatment (drafted/ready/rejected): one run. Bounded schedule (6
+      // solo jobs max): 15..5 days ago (2-day steps, always positive).
+      // Rejected also carries an applied date, a fixed 2-day gap after its
+      // (sole) finalize run.
+      const runDaysAgo = 15 - soloIdx * 2;
+      pushRun(j, j.status === "drafted" ? "first-draft-job" : "finalize-job", runDaysAgo);
+      if (j.status === "rejected") j.applied = dateStamp(runDaysAgo - 2);
+      soloIdx++;
     }
   }
 

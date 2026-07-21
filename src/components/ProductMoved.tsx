@@ -7,7 +7,14 @@ import { sscHubUrl, SSC_HUB_WINDOW } from "../lib/sscHub";
 // landing somewhere honest, and hands the owner off to the real surface. The
 // CTA targets the hub's shared named window (lib/sscHub) so repeated opens
 // reuse one tab.
-export function ProductMoved() {
+//
+// SIM-426: `hubUrl` is the server-declared hub base (config.sscHubUrl, GET
+// /api/config) - null on every hosted instance (the hub only ever resolves on
+// the SAME machine as its process, i.e. local dev). Demo mode already hides
+// this whole tab (TopBar's demoMode gate, "QA BUG-3"); this covers the OTHER
+// door - a private hosted instance, which is real mode but still remote - so
+// the CTA never renders a dead localhost link there either.
+export function ProductMoved({ hubUrl }: { hubUrl?: string | null }) {
   return (
     <div className="h-full overflow-auto">
       <div className="mx-auto max-w-xl px-6 py-16 text-center">
@@ -20,15 +27,21 @@ export function ProductMoved() {
           <strong className="text-[var(--color-text)]">SSC Product Hub</strong> — the org's own command center —
           reading this same board. Job-Hunt stays focused on the job search itself.
         </p>
-        <a
-          href={sscHubUrl()}
-          target={SSC_HUB_WINDOW}
-          rel="noopener"
-          className="mt-6 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-[13px] font-medium text-white"
-          style={{ background: "var(--color-accent, #4f46e5)" }}
-        >
-          Open Product Hub →
-        </a>
+        {hubUrl ? (
+          <a
+            href={sscHubUrl(hubUrl)}
+            target={SSC_HUB_WINDOW}
+            rel="noopener"
+            className="mt-6 inline-flex items-center gap-2 rounded-lg px-4 py-2 text-[13px] font-medium text-white"
+            style={{ background: "var(--color-accent, #4f46e5)" }}
+          >
+            Open Product Hub →
+          </a>
+        ) : (
+          <p className="mt-6 text-[12px] text-[var(--color-muted)]">
+            The Product Hub runs alongside this app on Simon's own machine, so it isn't reachable from here.
+          </p>
+        )}
       </div>
     </div>
   );

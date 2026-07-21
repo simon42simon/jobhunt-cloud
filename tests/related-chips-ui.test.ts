@@ -17,15 +17,25 @@ const read = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.met
 describe("App owns the deep-link handoff (openEntity -> SSC hub)", () => {
   const src = read("../src/App.tsx");
 
-  it("openEntity hands the entity to the SSC hub and leaves the current view alone", () => {
-    expect(src).toMatch(/openEntity = useCallback\(\(entity: EntityRef\) => \{\s*openSscHub\(entity\);\s*\}, \[\]\)/);
+  it("openEntity hands the entity to the SSC hub (resolved base, config.sscHubUrl) and leaves the current view alone", () => {
+    expect(src).toMatch(
+      /openEntity = useCallback\(\s*\(entity: EntityRef\) => \{\s*openSscHub\(config\?\.sscHubUrl, entity\);\s*\},/,
+    );
     // No view switch inside the handoff - the hub is its own surface now.
     const body = src.slice(src.indexOf("openEntity = useCallback"), src.indexOf("openDecisions"));
     expect(body).not.toContain('setView("product")');
   });
 
-  it("the bell's Review decisions hands off to the hub's Decisions page", () => {
-    expect(src).toMatch(/openDecisions = useCallback\(\(\) => \{\s*openSscHub\("decisions"\);\s*\}, \[\]\)/);
+  it("the bell's Review decisions hands off to the hub's Decisions page (resolved base)", () => {
+    expect(src).toMatch(
+      /openDecisions = useCallback\(\(\) => \{\s*openSscHub\(config\?\.sscHubUrl, "decisions"\);\s*\}, \[config\?\.sscHubUrl\]\)/,
+    );
+  });
+
+  // SIM-426: neither handoff may fall back to a hardcoded host - the resolved
+  // base always travels through as the explicit first arg.
+  it("neither handoff hardcodes the SSC hub host", () => {
+    expect(src).not.toContain("localhost:5185");
   });
 
   it("the in-app hub-focus primitive is fully retired", () => {
@@ -53,13 +63,22 @@ describe("ProductMoved is the permanent Product-tab content", () => {
   const src = read("../src/components/ProductMoved.tsx");
 
   it("the product view renders the handoff panel, nothing legacy", () => {
-    expect(app).toMatch(/view === "product" \? \(\s*<ProductMoved \/>/);
+    expect(app).toMatch(/view === "product" \? \(\s*<ProductMoved hubUrl=\{config\?\.sscHubUrl\} \/>/);
   });
 
-  it("its CTA targets the hub's shared named window via lib/sscHub", () => {
-    expect(src).toContain("sscHubUrl()");
+  it("its CTA targets the hub's shared named window via lib/sscHub, resolved base only", () => {
+    expect(src).toContain("sscHubUrl(hubUrl)");
     expect(src).toContain("target={SSC_HUB_WINDOW}");
     expect(src).not.toContain("showLegacy");
+    expect(src).not.toContain("localhost:5185");
+  });
+
+  // SIM-426: a private hosted instance is real mode but still remote - the
+  // Product tab's own hub-not-configured fallback is the OTHER door "QA BUG-3"
+  // (demoMode hiding the whole tab) did not close.
+  it("renders an honest fallback (not a dead link) when no hub is configured", () => {
+    expect(src).toContain("hubUrl ? (");
+    expect(src).toContain("isn't reachable from here");
   });
 });
 

@@ -1184,8 +1184,10 @@ export function JobDetailDrawer({
 
             {/* Per-job assistant chat (Part 4), pinned to the bottom. Read-only
                 assistant; a suggested action routes through runSuggested (the same
-                guard as the action buttons). */}
-            <JobChat jobId={job.id} onRunSuggested={runSuggested} />
+                guard as the action buttons). SIM-425: gated off on demo/hosted
+                (mirrors App's own config?.appMode === "demo" check) since the
+                assistant shells out to a CLI the deployed image doesn't have. */}
+            <JobChat jobId={job.id} onRunSuggested={runSuggested} demoMode={config?.appMode === "demo"} />
           </>
         )}
       </aside>

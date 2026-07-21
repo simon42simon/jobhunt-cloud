@@ -98,12 +98,18 @@ export const api = {
   getJobChat: (id: string) =>
     fetch(`/api/jobs/${encodeURIComponent(id)}/chat`).then((r) => json<{ messages: ChatMessage[] }>(r)),
 
+  // SIM-425: on demo/hosted the server gates the live assistant off (never
+  // spawns the CLI) and returns { disabled, reason, messages } instead of a
+  // { reply, messages } pair - the transcript comes back unchanged. Both shapes
+  // are typed here so JobChat can branch on `disabled` without a cast.
   postJobChat: (id: string, message: string) =>
     fetch(`/api/jobs/${encodeURIComponent(id)}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message }),
-    }).then((r) => json<{ reply: ChatMessage; messages: ChatMessage[] }>(r)),
+    }).then((r) =>
+      json<{ reply: ChatMessage; messages: ChatMessage[]; disabled?: false } | { disabled: true; reason: string; messages: ChatMessage[] }>(r),
+    ),
 
   updateJob: (id: string, updates: Partial<Record<string, string | null>>) =>
     fetch(`/api/jobs/${encodeURIComponent(id)}`, {

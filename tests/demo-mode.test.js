@@ -86,6 +86,10 @@ suite("demo mode, end to end (embedded PG)", () => {
     expect(cfg.status).toBe(200);
     expect(cfg.body.appMode).toBe("demo");
     expect(cfg.body.sse).toBe(false); // SIM-390 item 3: pg backend -> no SSE
+    // SIM-426: the SSC Hub only ever resolves on the hub's own machine (local
+    // dev) - every pg-backed instance (this one included) declares null so the
+    // client hides the hub deep links instead of rendering a dead localhost one.
+    expect(cfg.body.sscHubUrl).toBeNull();
 
     const jobs = await request(app).get("/api/jobs");
     expect(jobs.status).toBe(200);
@@ -128,6 +132,26 @@ suite("demo mode, end to end (embedded PG)", () => {
     expect(missing.status).toBe(404);
   });
 
+  it("SIM-425: posting a chat message on demo/hosted never spawns the CLI - honest disabled response, no 500, transcript unchanged", async () => {
+    const jobs = (await request(app).get("/api/jobs")).body;
+    const target = jobs[0];
+    const before = (await request(app).get(`/api/jobs/${encodeURIComponent(target.id)}/chat`)).body.messages;
+
+    const res = await request(app)
+      .post(`/api/jobs/${encodeURIComponent(target.id)}/chat`)
+      .send({ message: "What makes me a fit for this role?" });
+    writesSpent++;
+    expect(res.status).toBe(200); // never a 500, even though no `claude` CLI exists here
+    expect(res.body.disabled).toBe(true);
+    expect(res.body.reason).toBe("The live assistant is turned off in the hosted demo.");
+    // No invented user or assistant turn was appended - the transcript the
+    // client falls back to is exactly what it already held.
+    expect(res.body.messages).toEqual(before);
+
+    const after = (await request(app).get(`/api/jobs/${encodeURIComponent(target.id)}/chat`)).body.messages;
+    expect(after).toEqual(before);
+  });
+
   it("SIM-390 item 2: the canned replay names the actual replayed job", async () => {
     const jobs = (await request(app).get("/api/jobs")).body;
     const hero = jobs.find((j) => j.status === "queued") || jobs[0];
@@ -151,6 +175,19 @@ suite("demo mode, end to end (embedded PG)", () => {
     // The transcript names THIS job's folder + role file, not the placeholder.
     expect(run.output).toContain(`${hero.id}/${hero.role}.md`);
     expect(run.output).not.toContain("Demo/Operations Analyst.md");
+
+    // SIM-422: the transcript claims "a fictional CV and cover letter are ready
+    // for review" - the drawer must actually carry them, not stay empty while
+    // the run panel says DONE. And the readiness flip (hasCV/hasCoverLetter)
+    // is what nextStatusAfterRun needs to auto-advance queued/lead -> drafted.
+    const after = (await request(app).get(`/api/jobs/${encodeURIComponent(hero.id)}`)).body;
+    expect(after.hasCV).toBe(true);
+    expect(after.hasCoverLetter).toBe(true);
+    expect((after.files || []).some((f) => /cv/i.test(f.name))).toBe(true);
+    expect((after.files || []).some((f) => /cover/i.test(f.name))).toBe(true);
+    if (hero.status === "queued" || hero.status === "lead") {
+      expect(after.status).toBe("drafted");
+    }
   });
 
   it("GC-4 (SIM-393 I4): the demo upload is capped at <= 1 MB - over-cap is a 413", async () => {
