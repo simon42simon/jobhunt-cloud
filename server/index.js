@@ -41,6 +41,7 @@ import {
   runDurationHistory,
   medianMs,
   resolveUploadPolicy,
+  DRAFT_ROUTINE,
 } from "./lib.js";
 // Boot-time orphaned-run reconcile (SIM-70): the SAME core the standalone CLI
 // (ops/activity-log-reconcile.mjs) runs. A restart mid-run orphans the old
@@ -86,7 +87,7 @@ import {
 // (guardian GC-1) + the sync content helpers, reused by the /api/sync/* routes.
 import { isSafeName } from "./name-safety.js";
 import { sha256Hex } from "./sync-lib.js";
-import { loadTranscriptLines } from "../demo/replay.mjs";
+import { loadTranscriptLines, fictionalDraftArtifacts } from "../demo/replay.mjs";
 import { generate as generateDemoSeed, applySeed as applyDemoSeed } from "../demo/seed.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -511,6 +512,16 @@ app.get("/api/config", (req, res) => {
     // the capability outright so the client can gate its EventSource on it and
     // never fire the doomed request. File-backed (laptop/dev) keeps live SSE.
     sse: runtime.storeBackend !== "pg",
+    // SIM-426: the SSC Hub deep links (bell "Review decisions", related-entity
+    // chips, the Product tab's handoff CTA) only ever resolve for someone on
+    // the SAME machine as the companion SSC Product Hub process - i.e. local
+    // (file-backed) dev. Every hosted instance is pg-backed (private AND
+    // public demo alike, per DEPLOYMENT.md) and rendered a dead localhost link
+    // there before this fix - the identical leak "QA BUG-3" fixed for the
+    // Product tab, reached through doors that fix did not close. Reuse the
+    // SAME storeBackend signal `sse` above uses; env-overridable so the owner
+    // can point it elsewhere without a code change.
+    sscHubUrl: runtime.storeBackend === "pg" ? null : process.env.SSC_HUB_URL || "http://localhost:5185",
   });
 });
 
@@ -3224,6 +3235,26 @@ function runDemoReplay(run, def, routine) {
     run.currentActivity = null;
     run.exitCode = 0;
     if (run.status === "running") run.status = "done";
+    // SIM-422: the first-draft-job transcript above claims "a fictional CV and
+    // cover letter are ready for review" - attach the same shape of fictional
+    // artifact the seed pre-bakes for far-along jobs (demo/seed.mjs) so the
+    // drawer's FILES section actually shows them instead of leaving the demo's
+    // hero moment DONE-but-empty. Also what unblocks the status auto-advance
+    // below: nextStatusAfterRun (server/lib.js) requires draftDone (a real
+    // cv/cover file on disk), which never flips on a bare transcript replay.
+    // Best-effort: never let this block the run from closing.
+    if (routine === DRAFT_ROUTINE && run.jobId) {
+      try {
+        const job = store.getJobSummary(run.jobId);
+        if (job) {
+          for (const a of fictionalDraftArtifacts({ role: job.role, employer: job.employer, jobId: run.jobId })) {
+            store.saveJobArtifact(run.jobId, a.name, a.mime, Buffer.from(a.text, "utf8"));
+          }
+        }
+      } catch {
+        /* best-effort demo polish; never block run close */
+      }
+    }
     noteRunDuration(routine, Date.now() - Date.parse(run.startedAt));
     store.appendActivity({ kind: "run", runId: run.id, status: run.status, exitCode: 0, batchId: run.batchId || null });
     if (def.scope === "job" && run.jobId) maybeAutoAdvanceJob(routine, 0, run.jobId);
@@ -3834,6 +3865,23 @@ app.post("/api/jobs/:id/chat", async (req, res) => {
   const { message } = req.body || {};
   if (typeof message !== "string" || !message.trim()) {
     return res.status(400).json({ error: "message required" });
+  }
+  // SIM-425: runReadOnlyAssistant shells out to the `claude` CLI, which does not
+  // exist in the deployed cloud image - every hosted send 500'd. Mirror
+  // startRun's DEMO_MODE gate (design 5.2): never spawn the CLI on demo/hosted.
+  // Degrade to an honest disabled response instead of faking a canned reply -
+  // the transcript is returned UNCHANGED (no invented user or assistant turn is
+  // persisted), so a demo visitor's message is never silently absorbed into a
+  // fake conversation. The client (JobChat) renders this as a disabled state
+  // and never lets a visitor try to send in the first place.
+  if (DEMO_MODE) {
+    const chats = store.loadChats();
+    const history = Array.isArray(chats[folder]) ? chats[folder] : [];
+    return res.json({
+      disabled: true,
+      reason: "The live assistant is turned off in the hosted demo.",
+      messages: history,
+    });
   }
   const text = message.trim().slice(0, 4000);
   const chats = store.loadChats();
