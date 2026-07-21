@@ -126,6 +126,15 @@ export interface AppConfig {
   // not fire the EventSource at all (it polls instead). Absent (an older
   // server) is treated as available.
   sse?: boolean;
+  // SIM-426: the companion SSC Product Hub's URL, or null when there is none
+  // to link to. The hub only ever resolves for someone on the SAME machine as
+  // that process - i.e. local (file-backed) dev - so the server declares this
+  // null on every hosted instance (private OR public demo, both pg-backed;
+  // same signal as `sse` above) and the client hides every hub deep link
+  // (notification bell "Review decisions", related-entity chips, the Product
+  // tab's handoff CTA) rather than rendering a dead localhost link. Absent (an
+  // older server) is treated the same as null - no link.
+  sscHubUrl?: string | null;
 }
 
 export type PhaseStatus = "shipped" | "in_progress" | "planned" | "later";

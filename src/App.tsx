@@ -207,15 +207,22 @@ export default function App() {
   // standalone SSC Product Hub in its shared named window (lib/sscHub maps
   // EntityRef -> #/tasks/<id> | #/projects/<id>). The current job-hunt view is
   // left alone - the hub is its own surface, not a view of this app.
-  const openEntity = useCallback((entity: EntityRef) => {
-    openSscHub(entity);
-  }, []);
+  // SIM-426: openSscHub takes the server-declared hub base (config.sscHubUrl,
+  // GET /api/config) and no-ops when it is null - every hosted instance
+  // (private OR public demo, config not loaded yet included), never a
+  // hardcoded localhost fallback.
+  const openEntity = useCallback(
+    (entity: EntityRef) => {
+      openSscHub(config?.sscHubUrl, entity);
+    },
+    [config?.sscHubUrl],
+  );
 
   // The bell's "Review decisions" (Decisions surface v2): same handoff, fixed
   // page key - the SSC hub's Decisions page.
   const openDecisions = useCallback(() => {
-    openSscHub("decisions");
-  }, []);
+    openSscHub(config?.sscHubUrl, "decisions");
+  }, [config?.sscHubUrl]);
 
   const [activeBatch, setActiveBatch] = useState<{
     batchId: string;
@@ -539,7 +546,7 @@ export default function App() {
               </div>
             </div>
           ) : view === "product" ? (
-            <ProductMoved />
+            <ProductMoved hubUrl={config?.sscHubUrl} />
           ) : view === "discovery" ? (
             <DiscoveryView
               sources={discoverySources}

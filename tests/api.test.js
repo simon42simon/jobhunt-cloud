@@ -86,6 +86,11 @@ describe("GET /api/config", () => {
     const res = await request(app).get("/api/config");
     expect(res.body.sse).toBe(true); // pg backends declare false - see demo-mode.test.js
   });
+
+  it("declares the SSC Hub URL on the file backend (SIM-426) - local dev, the hub's own machine", async () => {
+    const res = await request(app).get("/api/config");
+    expect(res.body.sscHubUrl).toBe("http://localhost:5185"); // pg backends declare null - see demo-mode.test.js
+  });
 });
 
 describe("GET /api/jobs/:id/chat (SIM-390 item 4)", () => {
