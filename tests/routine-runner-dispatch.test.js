@@ -112,11 +112,12 @@ describe("dispatch", () => {
     expect(dup.body.error).toMatch(/already in progress/);
   });
 
-  it("refuses Stop honestly - the cloud has no channel into the laptop", async () => {
-    const r = await request(app).post(`/api/routines/run/${lastRunId}/stop`);
-    expect(r.status).toBe(409);
-    expect(r.body.error).toMatch(/laptop runner/);
-  });
+  // SIM-543 contract: Stop on a run whose job is still QUEUED cancels it
+  // server-side (the cloud queue is ours to edit until a runner claims);
+  // only a CLAIMED/RUNNING job earns the honest 409 - covered after the
+  // claim below. Ordering note: the queued-cancel case is proven in
+  // tests/runner-run-bridge.test.js so THIS file's single job survives for
+  // the claim -> result lifecycle it exists to test.
 });
 
 describe("claim -> progress -> artifact -> result", () => {
@@ -126,6 +127,12 @@ describe("claim -> progress -> artifact -> result", () => {
     claim = await claimNext();
     expect(claim.kind).toBe("finalize-job");
     expect(claim.jobId).toBe(JOB);
+  });
+
+  it("refuses Stop honestly once the laptop owns the claimed job", async () => {
+    const r = await request(app).post(`/api/routines/run/${lastRunId}/stop`);
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/laptop/);
   });
 
   it("relayed progress lines surface on the run-panel poll", async () => {

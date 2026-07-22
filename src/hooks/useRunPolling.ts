@@ -14,6 +14,13 @@ import type { RoutineRun } from "../types";
 export function useRunPolling(runId: string, onFinished: () => void): RoutineRun | null {
   const [run, setRun] = useState<RoutineRun | null>(null);
   const finishedNotified = useRef(false);
+  // SIM-543: consecutive "run not found" answers. One or two can be a race
+  // (record still materializing / proxy blip); a streak means the record is
+  // GONE (server restarted and dropped its in-memory runs, or the id is
+  // unknown) - polling forever painted a phantom "Starting agent..." dialog
+  // that no backend state could ever correct. After the streak the panel gets
+  // an honest terminal record instead.
+  const notFoundStreak = useRef(0);
 
   useEffect(() => {
     let alive = true;
@@ -22,6 +29,7 @@ export function useRunPolling(runId: string, onFinished: () => void): RoutineRun
       try {
         const r = await api.getRun(runId);
         if (!alive) return;
+        notFoundStreak.current = 0;
         setRun(r);
         if (r.status === "running") {
           timer = window.setTimeout(poll, 1200);
@@ -29,8 +37,28 @@ export function useRunPolling(runId: string, onFinished: () => void): RoutineRun
           finishedNotified.current = true;
           onFinished();
         }
-      } catch {
-        if (alive) timer = window.setTimeout(poll, 2000);
+      } catch (e) {
+        if (!alive) return;
+        if ((e as { runNotFound?: boolean }).runNotFound && ++notFoundStreak.current >= 4) {
+          setRun({
+            id: runId,
+            routine: "",
+            label: "",
+            jobId: null,
+            status: "failed",
+            output:
+              "This run's record no longer exists on the server (it may have restarted). Check the job's files / the source's run history for the real outcome, then retry if needed.",
+            exitCode: null,
+            startedAt: null,
+            currentActivity: null,
+          } as unknown as RoutineRun);
+          if (!finishedNotified.current) {
+            finishedNotified.current = true;
+            onFinished();
+          }
+          return;
+        }
+        timer = window.setTimeout(poll, 2000);
       }
     };
     poll();
