@@ -78,6 +78,23 @@ function resolveClaude(cfg) {
   return process.platform === "win32" ? "claude.exe" : "claude";
 }
 
+// SIM-543: everything a spawn needs, checked ONCE at boot. Returns a list of
+// plain-language problems (empty = good to run). Exported for the unit test.
+// A bare-name claudeBin ("claude.exe" on PATH) is unverifiable here and is
+// allowed through; the per-job spawn-error capture still names it on failure.
+export function validateRunnerBoot(ctx) {
+  const problems = [];
+  if (!fs.existsSync(ctx.workspaceDir) || !fs.statSync(ctx.workspaceDir).isDirectory()) {
+    problems.push(
+      `workspace dir does not exist: ${ctx.workspaceDir} (derived from jobsDir=${ctx.jobsDir}; set JOBHUNT_JOBS_DIR or config.local.json jobsDir to a real local directory - the repo config.json carries the CONTAINER's /data/Jobs)`,
+    );
+  }
+  if (path.isAbsolute(ctx.claudeBin) && !fs.existsSync(ctx.claudeBin)) {
+    problems.push(`claude binary not found: ${ctx.claudeBin} (config claudeBin)`);
+  }
+  return problems;
+}
+
 // ---- outbound HTTPS helpers (pinned host, https only) ----------------------
 let PINNED_HOST = null;
 function api(cloudUrl, pathPart) {
@@ -211,6 +228,10 @@ function collectSourceRunResult(findsFile) {
   return result;
 }
 
+// Resolves { code, spawnError }: spawnError carries the REASON a spawn never
+// started (ENOENT binary, missing cwd, ...) instead of a bare code=1 that the
+// cloud can only render as "runner reported failure" (SIM-543 - a cwd
+// misconfig failed every job for an afternoon with no reason recorded anywhere).
 function runClaudeLocally(ctx, kind, jobId, payload, onLine, promptOpts = {}) {
   return new Promise((resolve) => {
     const prompt = buildRunnerPrompt(kind, jobId, payload, promptOpts); // MF-1: fixed template + data
@@ -233,8 +254,13 @@ function runClaudeLocally(ctx, kind, jobId, payload, onLine, promptOpts = {}) {
       }
     });
     proc.stderr.on("data", (d) => onLine(d.toString()));
-    proc.on("error", () => resolve(1));
-    proc.on("close", (code) => resolve(code == null ? 1 : code));
+    proc.on("error", (e) => {
+      const msg = `spawn failed: ${e && e.message ? e.message : e} (bin=${ctx.claudeBin} cwd=${ctx.workspaceDir})`;
+      console.error(`runner: ${msg}`);
+      onLine(`[spawn error] ${msg}`);
+      resolve({ code: 1, spawnError: msg });
+    });
+    proc.on("close", (code) => resolve({ code: code == null ? 1 : code, spawnError: null }));
   });
 }
 
@@ -252,8 +278,9 @@ async function processJob(ctx, job) {
   const hb = setInterval(() => heartbeat(ctx, id), HEARTBEAT_MS);
   hb.unref?.();
   let code = 1;
+  let spawnError = null;
   try {
-    code = await runClaudeLocally(ctx, kind, jobId, payload, (line) => {
+    ({ code, spawnError } = await runClaudeLocally(ctx, kind, jobId, payload, (line) => {
       // progress is DATA only; best-effort, never blocks the run
       const t = String(line).trim();
       if (t) fetch(api(ctx.cloudUrl, `/api/runner/jobs/${encodeURIComponent(id)}/progress`), {
@@ -261,7 +288,7 @@ async function processJob(ctx, job) {
         headers: { authorization: `Bearer ${ctx.token}`, "content-type": "application/json" },
         body: JSON.stringify({ lines: [t.slice(0, 500)] }),
       }).catch(() => {});
-    }, sourceRun ? { trackedLinksFile: sourceRun.trackedLinksFile, findsFile: sourceRun.findsFile } : {});
+    }, sourceRun ? { trackedLinksFile: sourceRun.trackedLinksFile, findsFile: sourceRun.findsFile } : {}));
   } finally {
     clearInterval(hb);
   }
@@ -290,8 +317,8 @@ async function processJob(ctx, job) {
     result = collectSourceRunResult(sourceRun.findsFile);
     if (!result) console.warn(`runner: no readable finds file at ${sourceRun.findsFile}`);
   }
-  await postResult(ctx, id, nonce, code === 0 ? "done" : "failed", code === 0 ? null : `local run exited ${code}`, result);
-  console.log(`runner: job ${id} (${kind}) finished code=${code}`);
+  await postResult(ctx, id, nonce, code === 0 ? "done" : "failed", code === 0 ? null : spawnError || `local run exited ${code}`, result);
+  console.log(`runner: job ${id} (${kind}) finished code=${code}${spawnError ? ` (${spawnError})` : ""}`);
 }
 
 // ---- main loop -------------------------------------------------------------
@@ -310,6 +337,18 @@ async function main() {
     claudeBin: resolveClaude(cfg),
     allowedTools: cfg.claudeAllowedTools || "Read,Glob,Grep,Edit,Write,WebSearch,WebFetch,Bash,Task,TodoWrite",
   };
+  // SIM-543 boot validation: refuse to START rather than fail every claim the
+  // same way. The repo config.json is the CONTAINER's (jobsDir /data/Jobs) -
+  // on a laptop, JOBHUNT_JOBS_DIR (or config.local.json's jobsDir) is
+  // REQUIRED to point at a real local directory; a bad claude binary path is
+  // the same class. Every claim this process took would otherwise die
+  // "spawn failed" with the queue half-drained.
+  const bootProblems = validateRunnerBoot(ctx);
+  if (bootProblems.length) {
+    for (const p of bootProblems) console.error(`runner: BOOT REFUSED - ${p}`);
+    process.exit(1);
+  }
+  console.log(`runner: workspace=${ctx.workspaceDir} jobsDir=${ctx.jobsDir} claude=${ctx.claudeBin}`);
   console.log(`runner: polling ${PINNED_HOST} (https, outbound-only). Ctrl-C to stop.`);
   // eslint-disable-next-line no-constant-condition
   while (true) {

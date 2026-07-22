@@ -628,11 +628,27 @@ function runnerAuth(req, res, next) {
 
 // Registered BEFORE the cookie auth gate (see the auth block above) so a tokened
 // runner is not blocked by the missing session cookie.
+// SIM-543: the newest moment ANY authenticated laptop runner asked for work.
+// In-memory on purpose - it answers "is a runner connected RIGHT NOW", which a
+// restart legitimately resets (a fresh container has not seen a poll yet).
+// Consumed by the run-status bridge below so a queued run can say "no laptop
+// runner connected" instead of impersonating progress.
+let lastRunnerPollAt = null;
+const RUNNER_POLL_STALE_MS = 90_000; // ~6 poll intervals; beyond this the runner is "not connected"
+
+function runnerLivenessNote() {
+  if (!lastRunnerPollAt) return "No laptop runner connected since this server started — start it on the laptop (ops/agent-runner.mjs)";
+  const ageS = Math.round((Date.now() - lastRunnerPollAt) / 1000);
+  if (ageS * 1000 > RUNNER_POLL_STALE_MS) return `No laptop runner connected — last seen ${ageS}s ago; start it on the laptop (ops/agent-runner.mjs)`;
+  return "Waiting for the laptop runner to pick this up";
+}
+
 function mountRunnerRoutes() {
   // Claim the next queued job (outbound pull). FOR UPDATE SKIP LOCKED in PgStore
   // makes a double-claim structurally impossible; 204 when the queue is empty.
   app.get("/api/runner/jobs/next", runnerAuth, (req, res) => {
     try {
+      lastRunnerPollAt = Date.now(); // SIM-543 liveness: a poll = a connected runner, claim or not
       const claim = store.claimAgentJob(req.runnerId);
       if (!claim) return res.status(204).end();
       // SIM-535: a source-scoped discovery claim is enriched AT CLAIM TIME with
@@ -3463,7 +3479,9 @@ function syncRunnerRoutedRun(run) {
   }
   if (aj) foldRunnerProgress(run, aj.progress);
   if (aj && (aj.status === "queued" || aj.status === "claimed" || aj.status === "running")) {
-    if (aj.status === "queued") run.currentActivity = "Waiting for the laptop runner to pick this up";
+    // Liveness-aware wait note (SIM-543): "queued" with no runner polling is a
+    // different owner situation than "queued, runner about to grab it".
+    if (aj.status === "queued") run.currentActivity = runnerLivenessNote();
     return; // genuinely pending
   }
   const ok = !!aj && aj.status === "done";
@@ -3824,9 +3842,65 @@ app.post("/api/routines/run", (req, res) => {
   launch();
 });
 
+// SIM-543: the run-panel contract, synthesized from an agent-job row for runs
+// the in-memory `runs` Map does not know: (a) runner-routed SOURCE runs, whose
+// runId IS the aj-* id and never enters the Map (the RunPanel used to poll into
+// 404 forever - a phantom "RUNNING" dialog no backend state could correct);
+// (b) any runner-routed JOB run after a container restart wiped the Map. The
+// progress lines fold through a throwaway pseudo-run via the SAME
+// foldRunnerProgress the Map path uses, so activity/transcript render alike.
+function synthesizeRunnerRun(aj) {
+  const sourceId = aj.payload && aj.payload.sourceId ? aj.payload.sourceId : null;
+  const pseudo = {
+    id: aj.id,
+    routine: aj.kind,
+    label: sourceId ? `Discovery source run (${sourceId})` : aj.kind,
+    jobId: aj.jobId || null,
+    batchId: null,
+    status: "running",
+    output: "",
+    exitCode: null,
+    startedAt: aj.claimedAt || aj.createdAt || null,
+    currentActivity: null,
+    stageIndex: 0,
+    stats: null,
+  };
+  foldRunnerProgress(pseudo, aj.progress);
+  if (aj.status === "queued") {
+    pseudo.currentActivity = runnerLivenessNote();
+  } else if (aj.status === "claimed" || aj.status === "running") {
+    if (!pseudo.currentActivity) pseudo.currentActivity = "Running on the laptop runner";
+  } else {
+    const ok = aj.status === "done";
+    pseudo.status = ok ? "done" : "failed";
+    pseudo.exitCode = ok ? 0 : 1;
+    pseudo.currentActivity = null;
+    if (!ok) {
+      const why = aj.error || (aj.status === "dead" ? "runner lease expired (laptop offline?)" : "runner reported failure");
+      pseudo.output = (pseudo.output + `\n[runner] ${why}`).slice(-MAX_OUTPUT);
+    }
+  }
+  return Object.fromEntries(Object.entries(pseudo).filter(([k]) => !k.startsWith("_")));
+}
+
 app.get("/api/routines/run/:runId", (req, res) => {
   const run = runs.get(req.params.runId);
-  if (!run) return res.status(404).json({ error: "run not found" });
+  if (!run) {
+    // aj-* fallback bridge (SIM-543). Sweep the source-record reconcile first so
+    // the row this read synthesizes from - and the registry pill beside it -
+    // already carry the terminal truth the sweep derives.
+    if (/^aj-/.test(req.params.runId)) {
+      try {
+        reconcileRunnerSourceRuns();
+      } catch {}
+      let aj = null;
+      try {
+        aj = store.agentJobById(req.params.runId);
+      } catch {}
+      if (aj) return res.json(synthesizeRunnerRun(aj));
+    }
+    return res.status(404).json({ error: "run not found" });
+  }
   // A runner-routed run's live state is the agent-job row; refresh on the poll
   // (progress lines -> the same stage/activity/transcript folds a local spawn
   // streams, terminal row -> the full close bookkeeping).
@@ -3836,14 +3910,59 @@ app.get("/api/routines/run/:runId", (req, res) => {
   res.json(Object.fromEntries(Object.entries(run).filter(([k]) => !k.startsWith("_"))));
 });
 
+// Shared stop semantics for anything backed by an agent-job row (SIM-543):
+// still QUEUED -> cancel server-side (no runner owns it yet; the cloud queue is
+// ours to edit), then sweep so the source record/run record flips in the same
+// motion. Claimed/running -> honest 409: the laptop owns it and the cloud has
+// no control channel in (outbound-only, MF-6). Terminal -> idempotent ok.
+function stopAgentJobBacked(ajId, res, afterCancel) {
+  let r;
+  try {
+    r = store.cancelAgentJob(ajId);
+  } catch (e) {
+    return res.status(500).json({ error: "cancel failed" });
+  }
+  if (r.ok) {
+    try {
+      afterCancel && afterCancel(r);
+    } catch {}
+    return res.json({ ok: true, canceled: !r.idempotent });
+  }
+  if (r.claimed) {
+    return res.status(409).json({ error: "this run executes on the laptop runner and cannot be stopped from the cloud; stop it on the laptop" });
+  }
+  return res.status(404).json({ error: "run not found" });
+}
+
 app.post("/api/routines/run/:runId/stop", (req, res) => {
   const run = runs.get(req.params.runId);
-  if (!run) return res.status(404).json({ error: "run not found" });
+  if (!run) {
+    // aj-* fallback (SIM-543): a source run's Stop button lands here.
+    if (/^aj-/.test(req.params.runId)) {
+      return stopAgentJobBacked(req.params.runId, res, () => {
+        try {
+          reconcileRunnerSourceRuns();
+        } catch {}
+      });
+    }
+    return res.status(404).json({ error: "run not found" });
+  }
   // A runner-routed run has no local process to kill, and the cloud holds no
-  // control channel into the laptop (outbound-only, MF-6) - refusing loudly is
-  // the honest answer, not a silent ok that leaves the agent running.
+  // control channel into the laptop - but a job STILL QUEUED is cancelable
+  // server-side (SIM-543); only a claimed/running job earns the honest 409.
+  // Sync first: a job that reached terminal between the last poll and this
+  // click closes with its REAL outcome, never overwritten by "stopped".
+  if (run.agentJobId && run.status === "running") syncRunnerRoutedRun(run);
   if (run.agentJobId && run.status === "running") {
-    return res.status(409).json({ error: "this run executes on the laptop runner and cannot be stopped from the cloud; stop it on the laptop" });
+    return stopAgentJobBacked(run.agentJobId, res, () => {
+      run.status = "stopped";
+      run.exitCode = null;
+      run.currentActivity = null;
+      run.output = (run.output + "\n[runner] canceled before a runner claimed it\n").slice(-MAX_OUTPUT);
+      store.appendActivity({ kind: "run", runId: run.id, status: "stopped", exitCode: null, batchId: run.batchId || null });
+      broadcast({ type: "run-finished", runId: run.id, routine: run.routine, jobId: run.jobId });
+      processQueue();
+    });
   }
   if (run._proc) {
     try {
@@ -5859,6 +5978,13 @@ app.delete("/api/discovery/sources/:id", (req, res) => {
 // read-modify-write atomic on the event loop. cb(err, result): err is
 // { httpStatus, error }, result is { runId, source } with the derived source.
 function launchSourceRun(sourceId, batchId, cb) {
+  // SIM-543: sweep the runner-record reconcile BEFORE the running-guard reads,
+  // so a record whose agent job already died/finished can never 409 a fresh
+  // launch ("a run is already in progress" against a corpse). Cheap when no
+  // runner-routed record is running; mirrors the job-scope launch sweep.
+  try {
+    reconcileRunnerSourceRuns();
+  } catch {}
   readDiscovery((err, disc) => {
     const finds = !err && disc && Array.isArray(disc.discoveries) ? disc.discoveries : [];
     const data = store.loadSources();

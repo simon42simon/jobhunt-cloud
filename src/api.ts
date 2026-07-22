@@ -185,8 +185,14 @@ export const api = {
       body: JSON.stringify({ routine, jobId }),
     }).then((r) => json<{ runId: string; prompt: string; label: string }>(r)),
 
+  // 404 is TYPED here (SIM-543): the poll hook must tell "this run record does
+  // not exist" (terminal - server restarted or id unknown) apart from a
+  // transient network/5xx error it should keep retrying.
   getRun: (runId: string) =>
-    fetch(`/api/routines/run/${runId}`).then((r) => json<RoutineRun>(r)),
+    fetch(`/api/routines/run/${runId}`).then((r) => {
+      if (r.status === 404) throw Object.assign(new Error("run not found"), { runNotFound: true });
+      return json<RoutineRun>(r);
+    }),
 
   stopRun: (runId: string) =>
     fetch(`/api/routines/run/${runId}/stop`, { method: "POST" }).then((r) => json<{ ok: boolean }>(r)),
