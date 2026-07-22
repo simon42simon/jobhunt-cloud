@@ -82,6 +82,12 @@ import {
   runnerIdFromToken,
   constantTimeEqualHex,
   RUNNER_ARTIFACT_MAX_BYTES,
+  // SIM-535 (runner-routed source discovery) + SIM-530 (the shared deadline
+  // rule): the scrape-contract wording and the result-payload validator live in
+  // runner-lib so the cloud prompt and the laptop runner can never disagree.
+  DEADLINE_CONTRACT_RULE,
+  FETCH_MODE_PROMPTS,
+  validateSourceRunResult,
 } from "./runner-lib.js";
 // SIM-393 I1 - vault->cloud sync ingest surface. The ONE shared name validator
 // (guardian GC-1) + the sync content helpers, reused by the /api/sync/* routes.
@@ -629,6 +635,47 @@ function mountRunnerRoutes() {
     try {
       const claim = store.claimAgentJob(req.runnerId);
       if (!claim) return res.status(204).end();
+      // SIM-535: a source-scoped discovery claim is enriched AT CLAIM TIME with
+      // everything the laptop run needs as DATA - the LIVE source record (so an
+      // instructions edit takes effect on the very next run, the same freshness
+      // buildSourceDiscoveryPrompt gives the local path) and the already-tracked
+      // link index for dedup. The scout itself never calls back into the cloud:
+      // the runner posts its finds file back on the result lane below.
+      if (claim.kind === "discover-jobs-source") {
+        let src = null;
+        try {
+          src = store.loadSources().sources.find((s) => s.id === (claim.payload || {}).sourceId) || null;
+        } catch {
+          /* a vanished/unreadable registry -> null; the runner template no-ops honestly */
+        }
+        let trackedLinks = [];
+        try {
+          trackedLinks = store
+            .listJobs()
+            .map((j) => (typeof j.link === "string" ? j.link.trim() : ""))
+            .filter(Boolean)
+            .slice(0, 2000);
+        } catch {
+          /* no index -> the server-side dedup below still guards */
+        }
+        claim.payload = {
+          ...(claim.payload || {}),
+          source: src
+            ? {
+                id: src.id,
+                name: src.name,
+                type: src.type,
+                sector: src.sector,
+                urls: src.urls || [],
+                fetchMode: src.fetchMode || null,
+                fetchNote: src.fetchNote || null,
+                instructions: src.instructions || "",
+                outputFields: src.outputFields || [],
+              }
+            : null,
+          trackedLinks,
+        };
+      }
       res.json(claim); // { id, kind, jobId, payload, nonce, attempts }
     } catch (e) {
       res.status(500).json({ error: "claim failed" });
@@ -686,12 +733,25 @@ function mountRunnerRoutes() {
   );
 
   // Finalize the job (idempotent, replay-safe). Validates the nonce + claimed-by;
-  // a repeat result for a terminal job is a 200 no-op.
+  // a repeat result for a terminal job is a 200 no-op. SIM-535: the body may
+  // carry a `result` payload (bounded by the global 100kb JSON cap; the runner
+  // trims to fit) - for discover-jobs-source it is the {counters, finds} the
+  // ingest below files; the replay-safe idempotent branch NEVER re-ingests.
   app.post("/api/runner/jobs/:id/result", runnerAuth, (req, res) => {
-    const { nonce, status, error } = req.body || {};
-    const r = store.completeAgentJob(req.params.id, { runnerId: req.runnerId, nonce, status, error });
+    const { nonce, status, error, result } = req.body || {};
+    const bounded = result && typeof result === "object" && !Array.isArray(result) ? result : null;
+    const r = store.completeAgentJob(req.params.id, { runnerId: req.runnerId, nonce, status, error, result: bounded });
     if (r.notFound) return res.status(404).json({ error: r.reason });
     if (!r.ok) return res.status(403).json({ error: r.reason });
+    if (r.kind === "discover-jobs-source" && !r.idempotent) {
+      // Files the finds + flips the source's run record. Guarded: an ingest
+      // failure must never turn a delivered result into a runner-side retry.
+      try {
+        ingestSourceRunResult(req.params.id);
+      } catch (e) {
+        console.error(`[jobhunt] source-run ingest failed for ${req.params.id}: ${e && e.message ? e.message : e}`);
+      }
+    }
     if (r.jobId) broadcast({ type: "jobs-changed" }); // cloud has no watcher; nudge the UI
     res.json({ ok: true, idempotent: !!r.idempotent });
   });
@@ -1305,6 +1365,13 @@ app.post("/api/agent-jobs", enqueueLimiter, (req, res) => {
   if (!runtime.runnerEnabled) return res.status(501).json({ error: "runner is not configured on this instance" });
   const { kind, jobId, note } = req.body || {};
   if (!isRunnerKind(kind)) return res.status(400).json({ error: "unknown or non-whitelisted runner kind" });
+  // SIM-535: source-scoped discovery is enqueued ONLY by the dedicated
+  // discovery endpoints, which own the run-record/lastRunAt bookkeeping this
+  // generic enqueue does not do (same single-bookkeeping-path rule that keeps
+  // scope:"source" routines off the generic /api/routines/run).
+  if (kind === "discover-jobs-source") {
+    return res.status(400).json({ error: "source-scoped discovery is launched via POST /api/discovery/sources/:id/run" });
+  }
   if (kind !== "discover-jobs") {
     if (!jobId || !store.getJobSummary(jobId)) return res.status(404).json({ error: "job not found" });
   }
@@ -2806,6 +2873,23 @@ function resolveClaude() {
 }
 const CLAUDE_BIN = resolveClaude();
 const ALLOWED_TOOLS = config.claudeAllowedTools || "Read,Glob,Grep,Edit,Write,WebSearch,WebFetch,Bash,Task,TodoWrite";
+
+// SIM-535: can THIS instance spawn an agent process at all? resolveClaude falls
+// back to a bare "claude"/"claude.exe" name when no real binary was found, so a
+// real path existing is the honest capability signal - on the pg/Railway image
+// (no claude, no python) this is false and every startRun spawn used to die
+// exit -2 AFTER stamping an optimistic record. Instances that cannot spawn
+// route source runs through the laptop runner queue instead (see
+// launchSourceRun); JOBHUNT_SOURCE_DISPATCH=local|runner is the owner/test
+// override seam (an env var, so an agent can never flip it on a live server).
+const CLAUDE_BIN_PRESENT = fs.existsSync(CLAUDE_BIN);
+function sourceRunDispatch() {
+  const o = process.env.JOBHUNT_SOURCE_DISPATCH;
+  if (o === "local" || o === "runner") return o;
+  if (DEMO_MODE) return "local"; // demo never spawns; startRun feeds the canned replay
+  if (CLAUDE_BIN_PRESENT) return "local";
+  return runtime.runnerEnabled ? "runner" : "local"; // no runner either -> fail loud locally, as before
+}
 
 // Whitelisted routines only - the client never supplies a free-form prompt.
 // SAFETY (ticket-scoped routines: work-ticket, assess-ticket): every other
@@ -5402,6 +5486,14 @@ function respondOneSource(res, data, id, status = 200) {
 }
 
 app.get("/api/discovery/sources", (req, res) => {
+  // SIM-535: flip any runner-path "running" record whose agent job died before
+  // serving the registry - the health pills must never outlive reality. Owns
+  // its own persistence; load AFTER it so this response reflects the sweep.
+  try {
+    reconcileRunnerSourceRuns();
+  } catch {
+    /* best-effort; the registry still serves */
+  }
   let data;
   try {
     data = store.loadSources();
@@ -5442,6 +5534,13 @@ app.get("/api/discovery/sources", (req, res) => {
 // registry GET's honest locked degrade: when Excel holds the workbook the
 // joined counts reflect the last-good finds and the payload says so.
 app.get("/api/discovery/sources/:id", (req, res) => {
+  // Same SIM-535 lazy sweep as the registry GET: the single-source poll is
+  // exactly what the UI watches while a runner-path run is pending.
+  try {
+    reconcileRunnerSourceRuns();
+  } catch {
+    /* best-effort; the read still serves */
+  }
   let data;
   try {
     data = store.loadSources();
@@ -5632,6 +5731,39 @@ function launchSourceRun(sourceId, batchId, cb) {
       store.saveSources(data);
       const aone = deriveSources(data, finds).sources.find((s) => s.id === source.id);
       return cb(null, { runId: arun.id, source: aone });
+    }
+    // SIM-535: an instance that cannot spawn agents locally (the pg/Railway
+    // image ships no claude binary) routes the run through the laptop runner
+    // queue instead of dying exit -2 after stamping an optimistic record. The
+    // SAME bookkeeping shape as the local path: optimistic "running" record +
+    // lastRunAt at launch; the terminal flip happens when the runner's result
+    // is ingested (ingestSourceRunResult) or the lazy dead-job reconcile runs.
+    // The record's runId IS the agent-job id, so every later hop (result
+    // ingest, reconcile, the UI's run history) joins on one identifier.
+    if (source.type !== "apify" && sourceRunDispatch() === "runner") {
+      const st = store.runnerQueueState();
+      const inflight = st.counts.queued + st.counts.claimed + st.counts.running;
+      if (inflight >= RUNNER_QUEUE_MAX_INFLIGHT) {
+        return cb({ httpStatus: 429, error: `runner queue is full (${RUNNER_QUEUE_MAX_INFLIGHT} in flight); wait for jobs to drain` });
+      }
+      const { id: ajId } = store.enqueueAgentJob({ kind: "discover-jobs-source", jobId: null, payload: { sourceId: source.id } });
+      const startedAt = new Date().toISOString();
+      source.runs = capRuns([
+        ...(source.runs || []),
+        {
+          runId: ajId,
+          startedAt,
+          durationMs: null,
+          outcome: "running",
+          leadsFound: null,
+          leadsNew: null,
+          trigger: batchId ? "all-due" : "manual",
+        },
+      ]);
+      source.lastRunAt = startedAt; // cadence anchor: it ran now
+      store.saveSources(data);
+      const rone = deriveSources(data, finds).sources.find((s) => s.id === source.id);
+      return cb(null, { runId: ajId, source: rone });
     }
     // startRun spawns asynchronously, so the optimistic record we append+save
     // right after ALWAYS lands before the process 'close' event can fire (I/O is
@@ -5896,17 +6028,8 @@ app.patch("/api/discovery/sources/:id/instruction-proposals/:proposalId", (req, 
   }
 });
 
-// How each fetch mode translates into marching orders for the scout - keyed by
-// the SOURCE_FETCH_MODES enum so the prompt and the stored flag can never
-// disagree on what a mode means.
-const FETCH_MODE_PROMPTS = {
-  "direct-list":
-    "Fetch mode: direct-list - the listing URL itself is fetchable. WebFetch the target URL(s) directly and enumerate current postings from the returned list; only fall back to search if the fetch genuinely fails.",
-  "google-site":
-    "Fetch mode: google-site - the listing page is NOT directly fetchable (JS app / anti-bot). Do not burn time fetching the board itself: enumerate postings via Google `site:` queries scoped to this source's domain (per the crawl instruction), then WebFetch each posting's detail page.",
-  "alert-email":
-    "Fetch mode: alert-email - postings for this source arrive via a saved email alert. Review the alert email(s) for new postings per the crawl instruction rather than crawling the board.",
-};
+// (FETCH_MODE_PROMPTS moved to runner-lib.js with SIM-535, so the runner-path
+// source template and this local-spawn prompt share ONE copy per mode.)
 
 // Build the scoped prompt for a single-source discovery run. Loads the source
 // live at prompt time (so an edit to its instructions/urls takes effect on the
@@ -5938,10 +6061,14 @@ export function buildSourceDiscoveryPrompt(id, extra = {}) {
     s.fetchNote ? `Fetch note (a verified quirk of this source - respect it): ${s.fetchNote}` : "",
     `Crawl / extraction instruction (follow verbatim): ${s.instructions || "(none provided)"}.`,
     out ? `For each lead capture these fields: ${out}.` : "",
-    // Scrape-contract enforcement (docs/data-schema.md §5 Decision 3): the two
-    // fields a lead needs to become a Job with zero manual re-research are a
-    // DIRECT posting URL and a deadline - both are REQUIRED, not best-effort.
-    `REQUIRED on every lead: (1) Link MUST be the direct posting page for that ONE role - the actual job-description/apply page - never a search-results page, a category/listing page, or the board's homepage; (2) Deadline MUST be set (a literal YYYY-MM-DD when the posting states one, else a short free-text note like "rolling" only when the posting itself says so - never leave it blank because you didn't check). Do NOT silently drop or skip a real opening just because one of these is hard to confirm: still record the lead, and if you truly cannot resolve a direct link or a deadline after checking, say so plainly in Notes (e.g. "could not resolve a direct link - only a search page found" / "no deadline posted") so it is flagged for triage attention, never filed as if it were complete.`,
+    // Scrape-contract enforcement (docs/data-schema.md §5 Decision 3): a lead
+    // needs a DIRECT posting URL, and its deadline follows THE shared
+    // stated-date-or-rolling rule (DEADLINE_CONTRACT_RULE, runner-lib.js).
+    // SIM-530: this line used to open with "Deadline MUST be set", which pushed
+    // the scout to invent literal dates for postings that stated none - the
+    // root cause of the ~70-job mass auto-close (SIM-529). The shared constant
+    // is pinned by tests/source-discovery-prompt.test.js on BOTH prompts.
+    `REQUIRED on every lead: (1) Link MUST be the direct posting page for that ONE role - the actual job-description/apply page - never a search-results page, a category/listing page, or the board's homepage. ${DEADLINE_CONTRACT_RULE} Do NOT silently drop or skip a real opening just because a field is hard to confirm: still record the lead, and if you truly cannot resolve a direct link after checking, say so plainly in Notes (e.g. "could not resolve a direct link - only a search page found") so it is flagged for triage attention, never filed as if it were complete.`,
     // Expired-posting guard (t-1783422051088): an already-closed posting cannot be
     // applied to, so recording it just clutters the queue. This is a belt in front
     // of discovery.py's cmd_add, which rejects a past-deadline find outright.
@@ -6059,6 +6186,158 @@ function finalizeSourceRun(run) {
       console.error(`[jobhunt] finalize source run failed: ${e.message}`);
     }
   });
+}
+
+// ---- runner-path source-run ingest + reconcile (SIM-535) --------------------
+// The runner-path twin of finalizeSourceRun. Called from the result route AFTER
+// completeAgentJob accepted a NON-idempotent terminal result for a
+// discover-jobs-source job, so replays can never double-file. Everything is
+// keyed off the CLAIMED ROW (payload.sourceId, the job's own id as runId) - the
+// MF-4 pattern - never off anything the request body claims. Filing reuses the
+// exact createJob contract POST /api/discovery/pursue uses, with server-side
+// link dedup as the belt on top of the scout's tracked-links index. leadsFound/
+// leadsNew come from jobs-by-source counts, NOT readDiscovery - the workbook
+// does not exist on the pg instance (the ENOENT this whole path fixes).
+function ingestSourceRunResult(agentJobId) {
+  const aj = store.agentJobById(agentJobId);
+  if (!aj || aj.kind !== "discover-jobs-source") return;
+  const sourceId = aj.payload && aj.payload.sourceId;
+  if (!sourceId) return;
+  const claimedAtMs = Date.parse(aj.claimedAt || "");
+  const durationMs = Number.isFinite(claimedAtMs) ? Math.max(0, Date.now() - claimedAtMs) : null;
+  let outcome;
+  let errorReason = null;
+  let leadsNew = null;
+  let counters = null;
+  if (aj.status !== "done") {
+    outcome = "failed";
+    errorReason = aj.error || "runner reported failure";
+  } else {
+    const v = validateSourceRunResult(aj.result);
+    if (!v.ok) {
+      // The run finished but its finds payload is missing/rejected: the honest
+      // outcome is "incomplete" - we cannot claim success OR failure over leads
+      // we never saw. The reason lands on the record for the health pill.
+      outcome = "incomplete";
+      errorReason = `finds payload rejected: ${v.reason}`;
+    } else {
+      outcome = "succeeded";
+      counters = v.counters;
+      const existing = new Set(
+        store
+          .listJobs()
+          .map((j) => (typeof j.link === "string" ? j.link.trim().toLowerCase() : ""))
+          .filter(Boolean)
+      );
+      let created = 0;
+      for (const f of v.finds) {
+        const key = f.link.trim().toLowerCase();
+        if (existing.has(key)) continue;
+        try {
+          store.createJob({
+            role: f.title,
+            employer: f.employer,
+            track: f.track,
+            fit: f.fit,
+            status: f.status,
+            sector: f.sector,
+            deadline: f.deadline,
+            link: f.link,
+            source: sourceId,
+          });
+          existing.add(key);
+          created++;
+        } catch (e) {
+          // One malformed find never sinks the batch; the skip is visible in
+          // the leadsNew-vs-finds delta and the server log.
+          console.error(`[jobhunt] source-run find skipped (${sourceId}): ${e && e.message ? e.message : e}`);
+        }
+      }
+      leadsNew = created;
+    }
+  }
+  const data = store.loadSources();
+  let leadsFound = null;
+  try {
+    leadsFound = store.listJobs().filter((j) => j.source === sourceId).length;
+  } catch {
+    /* count stays null - unreported, never fake */
+  }
+  finalizeRunRecord(data, { sourceId, runId: agentJobId, outcome, durationMs, leadsFound, leadsNew, errorReason });
+  if (counters && Object.keys(counters).length) {
+    const src = data.sources.find((s) => s.id === sourceId);
+    const rec = src && (src.runs || []).find((r) => r && r.runId === agentJobId);
+    if (rec) Object.assign(rec, counters);
+  }
+  store.saveSources(data);
+  broadcast({ type: "source-run-finished", sourceId });
+}
+
+// Lazy honesty reconcile for runner-path records: a laptop that dies mid-run
+// leaves the agent job to the lease sweep (-> dead) but nothing would ever flip
+// the source's optimistic "running" record. Swept on the registry read, so a
+// pill can lie only until the next look at the page that shows it. A record
+// whose agent job is still queued/claimed/running is genuinely pending and is
+// left alone. Owns its own load/save in two phases (ingests first - each saves
+// a fresh copy internally - then one fresh reload for the failure flips) so a
+// stale in-memory snapshot can never clobber an ingest's write.
+function reconcileRunnerSourceRuns() {
+  let data;
+  try {
+    data = store.loadSources();
+  } catch {
+    return false;
+  }
+  const stale = []; // { runId, status, error } of terminal/vanished agent jobs
+  for (const source of data.sources || []) {
+    for (const rec of source.runs || []) {
+      if (!rec || rec.outcome !== "running" || typeof rec.runId !== "string" || !rec.runId.startsWith("aj-")) continue;
+      let aj = null;
+      let readable = true;
+      try {
+        aj = store.agentJobById(rec.runId);
+      } catch {
+        readable = false; // store hiccup: leave the record for a later sweep
+      }
+      if (!readable) continue;
+      if (aj && (aj.status === "queued" || aj.status === "claimed" || aj.status === "running")) continue;
+      stale.push({ runId: rec.runId, status: aj ? aj.status : null, error: aj ? aj.error : null });
+    }
+  }
+  if (!stale.length) return false;
+  // Phase 1: results that arrived but never flipped their record (crash between
+  // completeAgentJob and saveSources) re-ingest now - safe to re-run because
+  // filing dedups by link and finalizeRunRecord overwrites the same record.
+  for (const p of stale.filter((p) => p.status === "done")) {
+    try {
+      ingestSourceRunResult(p.runId);
+    } catch {
+      /* keep the record running; a later sweep retries */
+    }
+  }
+  // Phase 2: dead/failed/vanished jobs flip their records on a FRESH load.
+  const rest = stale.filter((p) => p.status !== "done");
+  if (rest.length) {
+    try {
+      const fresh = store.loadSources();
+      let dirty = false;
+      for (const p of rest) {
+        for (const source of fresh.sources || []) {
+          const rec = (source.runs || []).find((r) => r && r.runId === p.runId && r.outcome === "running");
+          if (!rec) continue;
+          rec.outcome = p.status ? "failed" : "incomplete";
+          rec.errorReason = p.status
+            ? p.error || (p.status === "dead" ? "runner lease expired (laptop offline?)" : "runner failed")
+            : "agent job record vanished";
+          dirty = true;
+        }
+      }
+      if (dirty) store.saveSources(fresh);
+    } catch {
+      /* a later sweep retries */
+    }
+  }
+  return true;
 }
 
 // ---- job-folder file reader (remote-honest Files buttons, t-1783201094679) --

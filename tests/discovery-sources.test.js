@@ -590,8 +590,13 @@ describe("buildSourceDiscoveryPrompt: scrape-contract enforcement wording (Decis
     // direct link: the actual JD/apply page, never a search/listing page
     expect(prompt).toMatch(/direct posting page/i);
     expect(prompt).toMatch(/never a search-results page/i);
-    // deadline required
-    expect(prompt).toMatch(/Deadline MUST be set/i);
+    // deadline: the SIM-530 stated-date-or-rolling rule replaced the old
+    // "Deadline MUST be set" phrasing (the invented-deadline root cause behind
+    // the SIM-529 mass auto-close). tests/source-discovery-prompt.test.js pins
+    // the full shared constant; here we pin the substance + the regression.
+    expect(prompt).toMatch(/ONLY when the posting itself states/);
+    expect(prompt).toMatch(/never invent, guess, or estimate a date/i);
+    expect(prompt).not.toMatch(/Deadline MUST be set/i);
     // missing -> flagged for triage attention, not silently filed
     expect(prompt).toMatch(/flagged for triage attention/i);
     expect(prompt).toMatch(/Do NOT silently drop or skip/i);
