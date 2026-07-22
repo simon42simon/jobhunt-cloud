@@ -22,9 +22,24 @@ The full standing SOP is **`company-os/docs/sop-release-promotion.md`**. In brie
 4. On a clean pass, run the **deploy** workflow's `workflow_dispatch` with the tag to promote → the `production` Environment pauses for the owner's approval (the go-live GO) → the `production-current` alias is retagged to the SAME digest and the production service (pinned to `:production-current`) re-pulls it. No rebuild (`RAILWAY_PRODUCTION_TOKEN` secret).
 5. Verify the production surface is healthy.
 
-Railway topology (verified 2026-07-21): project **jobhunt-private**, service **`app`**, environments **`staging`** (`APP_MODE=demo` fictional seed, auth on, serverless/scale-to-zero, `/healthz` healthcheck) and **`production`**. Repo vars: `RAILWAY_SERVICE=app`; per-environment Railway **project tokens** (least privilege) live in the two secrets above.
+Railway topology (verified 2026-07-21): project **jobhunt-private**, service **`app`**, environments **`staging`** (`APP_MODE=demo` fictional seed, auth on, serverless/scale-to-zero, `/healthz` healthcheck) and **`production`**. Repo vars: `RAILWAY_SERVICE=app`; per-environment Railway **project tokens** (least privilege) live in the two secrets above. (The public demo is a separate project, **jobhunt-demo**, outside this release lane.)
 
 Rollback = promote a previous tag (every release is an immutable image tag).
+
+### Connecting a service to the image channel (one-time bootstrap, per environment)
+
+The whole lane rests on each Railway service being **pinned to its channel alias tag** — the workflow only moves registry tags and asks Railway to re-pull. A service whose Source is *not* connected to the image (e.g. it was ever `railway up`-loaded from the CLI) turns every deploy into a **silent no-op**: `railway redeploy` succeeds but re-ships the last CLI snapshot (SIM-487 — this is exactly how a staging-verified fix stayed off production while the promote reported SUCCESS; sibling of the SIM-463 gotcha "redeploy cannot create a FIRST deployment").
+
+For **each** environment of the `app` service (owner, in the Railway dashboard):
+
+1. Railway → **jobhunt-private** → `app` service → pick the environment → **Settings → Source → Connect Image**.
+2. Image: `ghcr.io/simon42simon/jobhunt-cloud:staging-current` (staging) / `ghcr.io/simon42simon/jobhunt-cloud:production-current` (production).
+3. Registry credentials (the GHCR package is private): username `simon42simon`, password = a GitHub PAT with `read:packages`. If that PAT is ever rotated/expired, update it here too — pulls fail otherwise.
+4. Railway auto-deploys on connect; confirm the new deployment's metadata shows the image + digest.
+
+Status: **done for both environments** (staging 2026-07-21 build-out; production connected 2026-07-21 ~20:35Z, verified 2026-07-22).
+
+Since SIM-487 the workflow **verifies every deploy** (`.github/scripts/verify-railway-deploy.sh`): after each `railway redeploy` it asserts via the Railway API that a *new* deployment reached SUCCESS whose `image`/`imageDigest` equal the GHCR digest of the tag being shipped, then probes the live `/healthz`. A disconnected source, wrong pin, stale pull, or dead deploy now **fails the workflow run** instead of reporting a phantom success.
 
 ## The gate
 

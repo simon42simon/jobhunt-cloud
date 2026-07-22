@@ -3,3 +3,5 @@
 # terminated `#!` shebang ("Invalid or unexpected token"), breaking the gate.
 # The committed blobs are already LF; this keeps working copies LF too.
 *.mjs text eol=lf
+# Same guard for CI shell scripts: a CRLF shebang breaks bash on the runner.
+*.sh text eol=lf

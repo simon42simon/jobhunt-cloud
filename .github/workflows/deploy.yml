@@ -30,6 +30,19 @@ name: deploy
 #     data-isolation review + the QA scorecard run BEFORE that approval, per
 #     company-os/docs/sop-release-promotion.md.
 #
+# DEPLOYS PROVE THEMSELVES (SIM-487): `railway redeploy` reports success even
+# when the service's Source is NOT connected to the image alias - it silently
+# re-ships the last CLI-uploaded snapshot (that no-op is how a staging-verified
+# fix stayed off production while this workflow reported SUCCESS; sibling of
+# the SIM-463 gotcha "redeploy cannot create a FIRST deployment"). So both
+# deploy steps are followed by .github/scripts/verify-railway-deploy.sh, which
+# asserts against the Railway API that a NEW deployment reached SUCCESS AND
+# that its image + imageDigest equal the GHCR digest of the tag being shipped,
+# then probes the live /healthz. Any mismatch FAILS the run - a promote can no
+# longer no-op quietly. One-time bootstrap per service (DEPLOYMENT.md
+# "Connecting a service to the image channel"): Settings -> Source -> Connect
+# Image -> ghcr.io/<owner>/jobhunt-cloud:<channel>-current + registry creds.
+#
 # RAILWAY TARGETING IS CONFIG, NOT HARDCODED:
 #   - vars.RAILWAY_SERVICE           (set: 'app')
 #   - vars.RAILWAY_STAGING_ENV       (default 'staging')
@@ -91,6 +104,24 @@ jobs:
       - name: Point staging-current at ${{ github.ref_name }}
         run: docker buildx imagetools create -t "$IMAGE:staging-current" "$IMAGE:${{ github.ref_name }}"
 
+      # The digest the verify step will hold Railway to: what the registry says
+      # the just-pushed version tag IS.
+      - name: Resolve expected image digest
+        id: digest
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:${{ github.ref_name }}" --format '{{json .Manifest}}' | jq -re .digest)
+          echo "expected=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "staging-current should now serve $DIGEST"
+
+      # Pre-redeploy baseline, so the verify step can insist a NEW deployment
+      # was actually created (empty on a first-ever deploy - that is fine).
+      - name: Capture pre-redeploy deployment baseline
+        if: ${{ env.RAILWAY_TOKEN != '' }}
+        id: baseline
+        env:
+          SERVICE_NAME: ${{ vars.RAILWAY_SERVICE || 'app' }}
+        run: echo "id=$(bash .github/scripts/verify-railway-deploy.sh latest-id)" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to STAGING (railway redeploy)
         if: ${{ env.RAILWAY_TOKEN != '' }}
         run: |
@@ -99,6 +130,17 @@ jobs:
           railway redeploy --yes \
             --service "${{ vars.RAILWAY_SERVICE || 'app' }}" \
             --environment "${{ vars.RAILWAY_STAGING_ENV || 'staging' }}"
+
+      # SIM-487: the deploy must prove itself - new deployment, right image,
+      # right digest, live /healthz - or this job FAILS.
+      - name: Verify STAGING actually deployed this image
+        if: ${{ env.RAILWAY_TOKEN != '' }}
+        env:
+          SERVICE_NAME: ${{ vars.RAILWAY_SERVICE || 'app' }}
+          EXPECTED_IMAGE: ${{ env.IMAGE }}:staging-current
+          EXPECTED_DIGEST: ${{ steps.digest.outputs.expected }}
+          BASELINE_DEPLOYMENT_ID: ${{ steps.baseline.outputs.id }}
+        run: bash .github/scripts/verify-railway-deploy.sh verify
 
   # ---- 2) promote the SAME image digest to PRODUCTION (gated: go-live GO) ---
   # Triggered manually AFTER the guardian review is GREEN and the QA scorecard
@@ -112,12 +154,34 @@ jobs:
     env:
       RAILWAY_TOKEN: ${{ secrets.RAILWAY_PRODUCTION_TOKEN }}
     steps:
+      # For .github/scripts/verify-railway-deploy.sh only - the app itself is
+      # never rebuilt here.
+      - name: Checkout (verify script)
+        uses: actions/checkout@v4
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Resolving the digest FIRST also validates the input: a promote_tag that
+      # was never built (typo, or the tag never rode build-and-stage) fails
+      # here with a registry error instead of minting a dangling alias.
+      - name: Resolve expected image digest for ${{ inputs.promote_tag }}
+        id: digest
+        run: |
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE:${{ inputs.promote_tag }}" --format '{{json .Manifest}}' | jq -re .digest)
+          echo "expected=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "production-current should serve $DIGEST after this promote"
+
+      - name: Capture pre-redeploy deployment baseline
+        if: ${{ env.RAILWAY_TOKEN != '' }}
+        id: baseline
+        env:
+          SERVICE_NAME: ${{ vars.RAILWAY_SERVICE || 'app' }}
+        run: echo "id=$(bash .github/scripts/verify-railway-deploy.sh latest-id)" >> "$GITHUB_OUTPUT"
 
       - name: Point production-current at ${{ inputs.promote_tag }} (same digest, no rebuild)
         run: docker buildx imagetools create -t "$IMAGE:production-current" "$IMAGE:${{ inputs.promote_tag }}"
@@ -130,3 +194,15 @@ jobs:
           railway redeploy --yes \
             --service "${{ vars.RAILWAY_SERVICE || 'app' }}" \
             --environment "${{ vars.RAILWAY_PRODUCTION_ENV || 'production' }}"
+
+      # SIM-487: the promote must prove itself - a NEW deployment reached
+      # SUCCESS serving exactly the promoted tag's digest, and /healthz answers
+      # - or this job FAILS. A silent no-op can never again report SUCCESS.
+      - name: Verify PRODUCTION actually deployed this image
+        if: ${{ env.RAILWAY_TOKEN != '' }}
+        env:
+          SERVICE_NAME: ${{ vars.RAILWAY_SERVICE || 'app' }}
+          EXPECTED_IMAGE: ${{ env.IMAGE }}:production-current
+          EXPECTED_DIGEST: ${{ steps.digest.outputs.expected }}
+          BASELINE_DEPLOYMENT_ID: ${{ steps.baseline.outputs.id }}
+        run: bash .github/scripts/verify-railway-deploy.sh verify
