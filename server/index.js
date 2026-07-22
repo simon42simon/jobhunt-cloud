@@ -752,6 +752,17 @@ function mountRunnerRoutes() {
         console.error(`[jobhunt] source-run ingest failed for ${req.params.id}: ${e && e.message ? e.message : e}`);
       }
     }
+    // A runner-routed JOB run closes push-style the moment its result lands -
+    // the artifacts were posted before this result, so the auto-advance rule
+    // (nextStatusAfterRun) already sees draftDone true. Guarded like the source
+    // ingest: a sync hiccup never turns a delivered result into a retry.
+    try {
+      for (const run of runs.values()) {
+        if (run.agentJobId === req.params.id) syncRunnerRoutedRun(run);
+      }
+    } catch (e) {
+      console.error(`[jobhunt] runner-run sync failed for ${req.params.id}: ${e && e.message ? e.message : e}`);
+    }
     if (r.jobId) broadcast({ type: "jobs-changed" }); // cloud has no watcher; nudge the UI
     res.json({ ok: true, idempotent: !!r.idempotent });
   });
@@ -2880,10 +2891,15 @@ const ALLOWED_TOOLS = config.claudeAllowedTools || "Read,Glob,Grep,Edit,Write,We
 // (no claude, no python) this is false and every startRun spawn used to die
 // exit -2 AFTER stamping an optimistic record. Instances that cannot spawn
 // route source runs through the laptop runner queue instead (see
-// launchSourceRun); JOBHUNT_SOURCE_DISPATCH=local|runner is the owner/test
-// override seam (an env var, so an agent can never flip it on a live server).
+// launchSourceRun) - and, same decision, JOB-scoped product routines through
+// startRunnerRoutedRun (the "[spawn error] spawn claude ENOENT" a cloud
+// Finalize click used to die with). "Can this instance spawn" is an
+// instance-level fact, not a scope-level one, so ONE dispatch seam serves
+// both; JOBHUNT_SOURCE_DISPATCH=local|runner is the owner/test override
+// (an env var, so an agent can never flip it on a live server; the name
+// predates the job-scope routing and is kept for deployed-config compat).
 const CLAUDE_BIN_PRESENT = fs.existsSync(CLAUDE_BIN);
-function sourceRunDispatch() {
+function agentRunDispatch() {
   const o = process.env.JOBHUNT_SOURCE_DISPATCH;
   if (o === "local" || o === "runner") return o;
   if (DEMO_MODE) return "local"; // demo never spawns; startRun feeds the canned replay
@@ -3381,6 +3397,127 @@ function runDemoReplay(run, def, routine) {
   setTimeout(step, DEMO_REPLAY_STEP_MS).unref?.();
 }
 
+// ---- runner-routed job runs (extends SIM-535 from sources to job scope) -----
+// An instance that cannot spawn agents locally (the pg/Railway image ships no
+// claude binary) used to die "[spawn error] spawn claude ENOENT" on every
+// job-scoped routine click (Finalize, Draft, Interview prep, ...) even though
+// the hybrid runner lane already whitelists those kinds end to end (enqueue ->
+// laptop claim -> artifact egress -> result). These helpers close that gap:
+// startRun routes such a run into the runner queue and keeps its record in the
+// SAME runs Map, so the whole existing surface (GET run/:runId polling, the
+// per-scope duplicate guard, batch drain, activity log, notifications) works
+// unchanged - the lifecycle is driven by the agent-job row instead of a child
+// process. Ticket-scoped routines are NOT runner kinds (they need this app's
+// own localhost API) and keep the local-spawn path.
+
+// Fold the agent-job progress lines (the raw stream-json lines the laptop
+// runner relays) into the run record through the SAME agentEventToUpdate parser
+// the local spawn pump uses - stages, currentActivity, transcript and stats all
+// behave identically. Lines the runner truncated past valid JSON degrade to a
+// verbatim append, the local pump's exact graceful-degradation posture.
+// `_progressCount` (underscore = never serialized to the client) remembers how
+// far we folded so a poll only consumes NEW lines.
+function foldRunnerProgress(run, lines) {
+  const arr = Array.isArray(lines) ? lines : [];
+  const def = ROUTINES[run.routine] || {};
+  for (let i = run._progressCount || 0; i < arr.length; i++) {
+    const t = String(arr[i]).trim();
+    if (!t) continue;
+    let folded = false;
+    if (t.startsWith("{")) {
+      try {
+        const upd = agentEventToUpdate(JSON.parse(t), def.stages || null, run.stageIndex, !!run._sawTranscript);
+        if (upd.appendText) {
+          run.output = (run.output + upd.appendText).slice(-MAX_OUTPUT);
+          run._sawTranscript = true;
+        }
+        if (upd.activity !== undefined) run.currentActivity = upd.activity;
+        run.stageIndex = upd.stageIndex;
+        if (upd.stats) run.stats = upd.stats;
+        folded = true;
+      } catch {
+        /* not a parseable event - fall through to verbatim */
+      }
+    }
+    if (!folded) run.output = (run.output + t + "\n").slice(-MAX_OUTPUT);
+  }
+  run._progressCount = arr.length;
+}
+
+// Reconcile ONE runner-routed run against its agent-job row. Non-terminal rows
+// just refresh the live view (progress + activity). A terminal/vanished row
+// runs the SAME close bookkeeping the local proc 'close' handler does: durable
+// close line, duration note (success only), status auto-advance, run-finished
+// broadcast, queue kick. Called from the run-panel poll (pull), the result
+// endpoint (push - right after the runner's artifacts landed, so draftDone is
+// already true when the auto-advance rule reads the job), and the launch
+// endpoints' sweep below (so a dead laptop can never wedge the concurrency
+// slots or the per-job duplicate guard forever).
+function syncRunnerRoutedRun(run) {
+  if (!run || !run.agentJobId || run.status !== "running") return;
+  let aj = null;
+  try {
+    aj = store.agentJobById(run.agentJobId);
+  } catch {
+    return; // store hiccup: leave the record for a later sync
+  }
+  if (aj) foldRunnerProgress(run, aj.progress);
+  if (aj && (aj.status === "queued" || aj.status === "claimed" || aj.status === "running")) {
+    if (aj.status === "queued") run.currentActivity = "Waiting for the laptop runner to pick this up";
+    return; // genuinely pending
+  }
+  const ok = !!aj && aj.status === "done";
+  if (!ok) {
+    const why = aj
+      ? aj.error || (aj.status === "dead" ? "runner lease expired (laptop offline?)" : "runner reported failure")
+      : "agent job record vanished";
+    run.output = (run.output + `\n[runner] ${why}`).slice(-MAX_OUTPUT);
+  }
+  run.currentActivity = null;
+  run.exitCode = ok ? 0 : 1;
+  run.status = ok ? "done" : "failed";
+  if (ok) noteRunDuration(run.routine, Date.now() - Date.parse(run.startedAt));
+  store.appendActivity({ kind: "run", runId: run.id, status: run.status, exitCode: run.exitCode, batchId: run.batchId || null });
+  const def = ROUTINES[run.routine];
+  if (def && def.scope === "job" && run.jobId) maybeAutoAdvanceJob(run.routine, run.exitCode, run.jobId);
+  broadcast({ type: "run-finished", runId: run.id, routine: run.routine, jobId: run.jobId });
+  processQueue();
+}
+
+// Sweep every live runner-routed run. Cheap when none exist (the local-spawn
+// instance): the runs Map is bounded at MAX_RUN_HISTORY and the agent-job read
+// only happens for runs that ARE runner-routed and still running.
+function reconcileRunnerRoutedRuns() {
+  for (const run of runs.values()) syncRunnerRoutedRun(run);
+}
+
+// The runner-queue leg of startRun. Mirrors the local spawn's contract: the run
+// record already exists in `runs` with its durable start line; a refused/failed
+// enqueue flips it to failed with a plain-language reason (the endpoint's
+// existing failed->500 answer carries it), and a successful enqueue leaves it
+// "running" with the agent-job id joined on for the sync above.
+function startRunnerRoutedRun(run, routine) {
+  run._proc = null;
+  try {
+    const st = store.runnerQueueState();
+    const inflight = st.counts.queued + st.counts.claimed + st.counts.running;
+    if (inflight >= RUNNER_QUEUE_MAX_INFLIGHT) {
+      run.status = "failed";
+      run.output = `runner queue is full (${RUNNER_QUEUE_MAX_INFLIGHT} in flight); wait for jobs to drain`;
+    } else {
+      run.agentJobId = store.enqueueAgentJob({ kind: routine, jobId: run.jobId, payload: {} }).id;
+      run.currentActivity = "Waiting for the laptop runner to pick this up";
+    }
+  } catch (e) {
+    run.status = "failed";
+    run.output = `failed to enqueue the runner job: ${e.message}`;
+  }
+  if (run.status === "failed") {
+    store.appendActivity({ kind: "run", runId: run.id, status: "failed", exitCode: null });
+  }
+  return run;
+}
+
 function startRun(routine, jobId, batchId = null, extra = {}) {
   const def = ROUTINES[routine];
   // The runId is minted BEFORE the prompt is built so a prompt can address its
@@ -3433,6 +3570,15 @@ function startRun(routine, jobId, batchId = null, extra = {}) {
     run._proc = null;
     runDemoReplay(run, def, routine);
     return run;
+  }
+  // Runner routing (see the block above startRunnerRoutedRun): a job-scoped
+  // WHITELISTED runner kind on an instance that cannot spawn locally goes to
+  // the laptop runner queue instead of a doomed ENOENT spawn. Sitting INSIDE
+  // startRun puts every launch path (single run, batch drain) behind the one
+  // decision; scope + kind are both checked so ticket-scoped routines and any
+  // future non-runner routine keep the local path (and its loud failure).
+  if (def.scope === "job" && isRunnerKind(routine) && agentRunDispatch() === "runner") {
+    return startRunnerRoutedRun(run, routine);
   }
   // Base argv shared by EVERY routine: `--allowedTools` (ALLOWED_TOOLS) is the
   // config-editable pre-approval tool list and `--permission-mode acceptEdits`
@@ -3623,6 +3769,10 @@ app.post("/api/routines/run", (req, res) => {
   const { routine, jobId } = req.body || {};
   const def = ROUTINES[routine];
   if (!def) return res.status(400).json({ error: "unknown routine" });
+  // Runner-routed runs reach terminal state via the result endpoint (push) or
+  // the run-panel poll (pull); sweep them here too so the duplicate guard and
+  // the concurrency count below never key off a run whose laptop died quietly.
+  reconcileRunnerRoutedRuns();
   // Source-scoped runs have their own endpoint (which does the run-history
   // bookkeeping); refuse to launch one through the generic path.
   if (def.scope === "source") {
@@ -3677,13 +3827,24 @@ app.post("/api/routines/run", (req, res) => {
 app.get("/api/routines/run/:runId", (req, res) => {
   const run = runs.get(req.params.runId);
   if (!run) return res.status(404).json({ error: "run not found" });
-  const { _proc, ...safe } = run;
-  res.json(safe);
+  // A runner-routed run's live state is the agent-job row; refresh on the poll
+  // (progress lines -> the same stage/activity/transcript folds a local spawn
+  // streams, terminal row -> the full close bookkeeping).
+  syncRunnerRoutedRun(run);
+  // Underscore fields are internal (the proc handle, the progress-fold cursor);
+  // everything else is the run-panel contract, unchanged.
+  res.json(Object.fromEntries(Object.entries(run).filter(([k]) => !k.startsWith("_"))));
 });
 
 app.post("/api/routines/run/:runId/stop", (req, res) => {
   const run = runs.get(req.params.runId);
   if (!run) return res.status(404).json({ error: "run not found" });
+  // A runner-routed run has no local process to kill, and the cloud holds no
+  // control channel into the laptop (outbound-only, MF-6) - refusing loudly is
+  // the honest answer, not a silent ok that leaves the agent running.
+  if (run.agentJobId && run.status === "running") {
+    return res.status(409).json({ error: "this run executes on the laptop runner and cannot be stopped from the cloud; stop it on the laptop" });
+  }
   if (run._proc) {
     try {
       run._proc.kill();
@@ -3700,6 +3861,9 @@ app.post("/api/routines/batch", (req, res) => {
   const def = ROUTINES[routine];
   if (!def || def.scope !== "job") return res.status(400).json({ error: "batch needs a job-scoped routine" });
   if (!Array.isArray(jobIds) || !jobIds.length) return res.status(400).json({ error: "jobIds required" });
+  // Same sweep as the single-run endpoint: never let a quietly-dead laptop run
+  // hold the per-job duplicate filter or a drain slot.
+  reconcileRunnerRoutedRuns();
   // Every routine gets the path-containment existence guard. finalize-job ADDS a
   // readiness guard (defense in depth): a job that is not finalizeReady is refused
   // even if the client asks, so a batch can NEVER finalize a job whose gaps note
@@ -3730,6 +3894,9 @@ app.post("/api/routines/batch", (req, res) => {
 
 app.get("/api/routines/batch/:batchId", (req, res) => {
   const bid = req.params.batchId;
+  // Batch progress is read off run statuses; refresh runner-routed ones first
+  // (this poll may be the only reader when no per-run panel is open).
+  reconcileRunnerRoutedRuns();
   const rs = [...runs.values()].filter((r) => r.batchId === bid);
   const queued = queue.filter((q) => q.batchId === bid).length;
   res.json({
@@ -5740,7 +5907,7 @@ function launchSourceRun(sourceId, batchId, cb) {
     // is ingested (ingestSourceRunResult) or the lazy dead-job reconcile runs.
     // The record's runId IS the agent-job id, so every later hop (result
     // ingest, reconcile, the UI's run history) joins on one identifier.
-    if (source.type !== "apify" && sourceRunDispatch() === "runner") {
+    if (source.type !== "apify" && agentRunDispatch() === "runner") {
       const st = store.runnerQueueState();
       const inflight = st.counts.queued + st.counts.claimed + st.counts.running;
       if (inflight >= RUNNER_QUEUE_MAX_INFLIGHT) {
