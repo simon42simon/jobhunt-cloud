@@ -6,6 +6,16 @@ Every shippable change gets an entry. Categories: **Added**, **Changed**, **Secu
 
 ---
 
+## [0.40.0] - 2026-07-22 17:10 ET
+
+QF app-recovery release (SIM-547) — the last python dependency on the pg instance falls.
+
+### Fixed
+- **Discovery "New finds" serves from Postgres on pg — the owner-visible `Could not read the discovery workbook: spawn python ENOENT` 500 ends (SIM-547, owner report 2026-07-22).** The pg/Railway image ships no python and no workbook, but `GET /api/discovery`, `/api/discovery/decide`, the pre-run prune, and the Apify find-writer all still shelled to `discovery.py`. A capability seam (`STORE_FINDS` — does the store expose finds methods?) now routes all four sites through the previously-unused `discovery_finds` table on PgStore: `listFinds` (workbook-dump row shape, `tracked` derived against jobs by link with title+employer fallback), `addFind` (discovery.py `add` dedup + tracked-refusal semantics — the Apify path's finds land in the New-finds triage inbox), `decideFind` (Title+Link locator, 0 rows → 404 like exit 3), `pruneFinds` (real-deadline-past, not-pursue, untracked → one SQL delete). FileStore exposes none of the methods, so the laptop workbook + python path is byte-identical; demo mode's seeded branch is unchanged. Runner-routed agent source runs keep ingesting directly as jobs (SIM-535 contract, untouched). Tests: `tests/discovery-finds-pg.test.js` on embedded PG with a child_process tripwire proving zero `discovery.py` calls across read/decide/add/Apify-run/prune.
+
+### Changed
+- **Changelog hygiene note:** every entry in [Unreleased] below was already on `main` by the v0.39.1 tag (2026-07-22) and is live in the shipped images; re-attributing each entry to its true first-release section (0.39.0 / 0.39.1 / earlier CLI-deploy era) is tracked as follow-up.
+
 ## [Unreleased]
 
 ### Security
