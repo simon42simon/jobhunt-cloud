@@ -4322,6 +4322,15 @@ const XLSX_PATH = path.join(WORKSPACE_DIR, "ops", "outputs", "Job Discovery.xlsx
 let discoveryCache = null; // { json, xlsxMtime }
 let discoveryDirty = false;
 
+// SIM-547: the finds-capability probe. PgStore owns the discovery_finds table
+// (the Dockerfile's "finds come from the discovery_finds table in cloud, not
+// discovery.py" - the pg image ships NO python), so on a store that exposes the
+// finds methods every read/triage/write/prune below goes through the store and
+// no discovery.py execFile can ever fire ("spawn python ENOENT" was the
+// owner-visible 500 on /api/discovery). FileStore deliberately does NOT expose
+// them - the laptop keeps the workbook + discovery.py path byte-identical.
+const STORE_FINDS = typeof store.listFinds === "function";
+
 // The autostart launcher (ops/scripts/start-app.cmd, a logon scheduled task)
 // can inherit a PATH without the user-profile Python entries; bare "python"
 // then resolves to the Microsoft Store redirector stub, which exits non-zero
@@ -4391,6 +4400,18 @@ function isWorkbookLocked(err, stderr) {
 // declaration (hoisted), so the POST /api/routines/run handler above can call it
 // even though PYTHON / isWorkbookLocked / discoveryDirty are defined below it.
 function pruneDiscoveriesBeforeDiscover(done) {
+  // SIM-547: on a finds-capable store the prune is one SQL delete against
+  // discovery_finds - same three conditions, same best-effort posture (an
+  // error is logged and skipped, never blocks the runs), no python.
+  if (STORE_FINDS) {
+    try {
+      const n = store.pruneFinds(localDateISO());
+      console.log(`[jobhunt] discover-jobs: prune ok - PRUNED ${n} rows`);
+    } catch (e) {
+      console.error(`[jobhunt] discover-jobs: prune skipped (${e.message})`);
+    }
+    return done();
+  }
   const script = path.join(WORKSPACE_DIR, "ops", "scripts", "discovery.py");
   let finished = false;
   const finishOnce = () => {
@@ -4475,6 +4496,17 @@ function readDiscovery(cb) {
       return cb(null, normalizeDiscoveryDump(JSON.parse(fs.readFileSync(seam, "utf8"))), { locked: false });
     } catch {
       return cb(null, { config: [], discoveries: [], runLog: [] }, { locked: false });
+    }
+  }
+  // SIM-547: a finds-capable store (PgStore) serves the discoveries straight
+  // from discovery_finds - no python, no workbook, no lock state. A store
+  // error surfaces through cb(err) exactly like a python failure, so GET
+  // /api/discovery 500s and the sources join degrades identically.
+  if (STORE_FINDS) {
+    try {
+      return cb(null, { config: [], discoveries: store.listFinds(), runLog: [] }, { locked: false });
+    } catch (e) {
+      return cb(e);
     }
   }
   const mtime = xlsxMtime();
@@ -4620,6 +4652,18 @@ app.post("/api/discovery/decide", (req, res) => {
   const dec = String(decision || "").trim().toLowerCase();
   if (!DISCOVERY_DECISIONS.includes(dec)) {
     return res.status(400).json({ error: "decision must be one of: skip, maybe, pursue, clear" });
+  }
+  // SIM-547: a finds-capable store triages the row in the table - same
+  // Title + Link locator, same 404 on no match (discovery.py's exit 3), no
+  // python and no lock state (there is no workbook to hold open).
+  if (STORE_FINDS) {
+    try {
+      const n = store.decideFind({ title: String(title), link: String(link || ""), decision: dec });
+      if (!n) return res.status(404).json({ error: "no matching discovery row for that title + link" });
+      return res.json({ ok: true, title, link: link || "", decision: dec, output: `DECIDED ${n} row(s)` });
+    } catch (e) {
+      return res.status(500).json({ error: "Could not write the decision: " + String(e.message || e) });
+    }
   }
   const script = path.join(WORKSPACE_DIR, "ops", "scripts", "discovery.py");
   execFile(
@@ -5519,6 +5563,13 @@ function apifyAddFind(find) {
 async function writeApifyFinds(finds) {
   let dup = 0;
   for (const f of finds) {
+    // SIM-547: a finds-capable store inserts into discovery_finds (dedup +
+    // tracked-skip inside addFind, mirroring discovery.py add) - the mapped
+    // find lands in the New-finds triage inbox, and no python ever spawns.
+    if (STORE_FINDS) {
+      if (!store.addFind(f).added) dup++;
+      continue;
+    }
     const out = await apifyAddFind(f);
     if (/^DUP\b/.test(out || "")) dup++;
   }
@@ -5544,7 +5595,11 @@ async function runApifyFlow(source, run) {
   try {
     ({ dup } = await writeApifyFinds(finds));
   } catch (e) {
-    return failApifyRun(run, e && e.locked ? WORKBOOK_LOCKED_MSG : "could not write finds to the workbook");
+    // Token-free either way; the finds store is the table on pg (no workbook).
+    return failApifyRun(
+      run,
+      e && e.locked ? WORKBOOK_LOCKED_MSG : STORE_FINDS ? "could not write finds to the finds table" : "could not write finds to the workbook"
+    );
   }
   run.status = "done";
   run.exitCode = 0;

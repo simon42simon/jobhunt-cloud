@@ -915,6 +915,136 @@ export class PgStore {
   }
 
   // ======================================================================
+  // DISCOVERY FINDS (SIM-547) - the pg replacement for the xlsx workbook
+  // ======================================================================
+  // The cloud instance ships NO python (Dockerfile: "finds come from the
+  // discovery_finds table in cloud, not discovery.py"), so the finds live in
+  // discovery_finds (migrations/0001_init.cjs) and these methods carry the
+  // read/write/triage semantics discovery.py owns on the laptop. FileStore
+  // deliberately does NOT implement them - the workbook + discovery.py path
+  // stays byte-identical there - so `typeof store.listFinds === "function"`
+  // is the capability probe index.js gates the python execFile paths on.
+  // "tracked" stays a DERIVED join against jobs (the migration's contract):
+  // matched by link, with title+employer as the fallback key - the same two
+  // keys the pursue/ingest paths write onto the created job.
+
+  listFinds() {
+    const rows = this._all(
+      `select f.date_found, f.title, f.employer, f.sector, f.track, f.fit,
+              f.tailoring, f.deadline, f.location, f.source, f.link, f.decision,
+              f.notes, f.source_id,
+              exists (
+                select 1 from jobs j
+                 where (coalesce(f.link,'') <> '' and lower(coalesce(j.link,'')) = lower(f.link))
+                    or (lower(j.role) = lower(coalesce(f.title,'')) and lower(j.employer) = lower(coalesce(f.employer,'')))
+              ) as tracked
+         from discovery_finds f
+        order by f.id`,
+      [],
+    );
+    // The workbook-dump row shape (src/types.ts `Discovery`): capitalized
+    // column-header keys + the derived tracked flag + the stamped sourceId.
+    return rows.map((r) => ({
+      "Date Found": r.date_found || "",
+      Title: r.title || "",
+      Employer: r.employer || "",
+      Sector: r.sector || "",
+      Track: r.track || "",
+      Fit: r.fit || "",
+      Tailoring: r.tailoring || "",
+      Deadline: r.deadline || "",
+      Location: r.location || "",
+      Source: r.source || "",
+      Link: r.link || "",
+      Decision: r.decision || "",
+      Notes: r.notes || "",
+      tracked: r.tracked === true,
+      sourceId: r.source_id || "",
+    }));
+  }
+
+  // Insert ONE find (the canonical lowercase shape mapApifyItem emits), with
+  // discovery.py add's dedup semantics: an existing find with the same
+  // title+employer or the same link, or a job already tracking that posting,
+  // is a DUP - the row is not inserted and the caller's honesty counter ticks.
+  addFind(find) {
+    const f = find || {};
+    const title = String(f.title || "").trim();
+    const employer = String(f.employer || "").trim();
+    const link = String(f.link || "").trim();
+    const dup = this._one(
+      `select 1 from discovery_finds
+        where (lower(coalesce(title,'')) = lower($1) and lower(coalesce(employer,'')) = lower($2))
+           or ($3 <> '' and lower(coalesce(link,'')) = lower($3))
+        limit 1`,
+      [title, employer, link],
+    );
+    if (dup) return { added: false, reason: "dup" };
+    const tracked = this._one(
+      `select 1 from jobs
+        where ($1 <> '' and lower(coalesce(link,'')) = lower($1))
+           or (lower(role) = lower($2) and lower(employer) = lower($3))
+        limit 1`,
+      [link, title, employer],
+    );
+    if (tracked) return { added: false, reason: "tracked" };
+    this.pg.query(
+      `insert into discovery_finds
+         (date_found, title, employer, sector, track, fit, tailoring, deadline,
+          location, source, link, decision, notes, source_id)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+      [
+        String(f.date || ""), title, employer, String(f.sector || ""),
+        String(f.track || ""), String(f.fit || ""), String(f.tailoring || ""),
+        String(f.deadline || ""), String(f.location || ""), String(f.source || ""),
+        link, "", String(f.notes || ""), String(f.sourceId || ""),
+      ],
+    );
+    return { added: true };
+  }
+
+  // Triage-in-place: write skip | maybe | pursue into a find's decision, or
+  // blank it ("clear"). Located by Title + Link - the SAME key discovery.py's
+  // `decide` uses (link "" falls back to title alone, mirroring the workbook
+  // path's tolerant match). Returns how many rows changed (0 -> the route 404s
+  // exactly like discovery.py's exit 3).
+  decideFind({ title, link, decision }) {
+    const dec = decision === "clear" ? "" : String(decision || "");
+    const t = String(title || "").trim();
+    const l = String(link || "").trim();
+    const r = this.pg.query(
+      `update discovery_finds
+          set decision = $1
+        where lower(trim(coalesce(title,''))) = lower($2)
+          and ($3 = '' or trim(coalesce(link,'')) = $3)`,
+      [dec, t, l],
+    );
+    return r.rowCount || 0;
+  }
+
+  // The pre-run prune (ADR-008): drop rows with a REAL deadline strictly before
+  // today, not decided "pursue", and not already tracked as a job - the same
+  // three conditions discovery.py's `prune` archives on. Free-text deadlines
+  // ("rolling") are never judged. The cloud has no Archive sheet, so a pruned
+  // row is deleted; the finds table is a triage inbox, not the record (a
+  // pursued find's job IS the record). Returns the pruned-row count.
+  pruneFinds(today) {
+    const r = this.pg.query(
+      `delete from discovery_finds f
+        where coalesce(f.deadline,'') ~ '^\\d{4}-\\d{2}-\\d{2}$'
+          and f.deadline < $1
+          and lower(coalesce(f.decision,'')) <> 'pursue'
+          and not exists (
+            select 1 from jobs j
+             where (coalesce(f.link,'') <> '' and lower(coalesce(j.link,'')) = lower(f.link))
+                or (lower(j.role) = lower(coalesce(f.title,'')) and lower(j.employer) = lower(coalesce(f.employer,'')))
+          )`,
+      [String(today || "")],
+    );
+    return r.rowCount || 0;
+  }
+
+  // ======================================================================
   // READ-ONLY LEDGERS (bundled repo files in BOTH stores, design 2.2)
   // ======================================================================
 
