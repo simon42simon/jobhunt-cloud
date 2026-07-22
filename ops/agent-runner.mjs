@@ -123,11 +123,11 @@ async function postArtifact(ctx, id, nonce, name, mime, bytes) {
   return res.status;
 }
 
-async function postResult(ctx, id, nonce, status, error) {
+async function postResult(ctx, id, nonce, status, error, result = null) {
   await fetch(api(ctx.cloudUrl, `/api/runner/jobs/${encodeURIComponent(id)}/result`), {
     method: "POST",
     headers: { authorization: `Bearer ${ctx.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ nonce, status, error }),
+    body: JSON.stringify(result ? { nonce, status, error, result } : { nonce, status, error }),
   });
 }
 
@@ -172,9 +172,48 @@ function collectOutputs(kind, folderPath, before) {
   return out;
 }
 
-function runClaudeLocally(ctx, kind, jobId, payload, onLine) {
+// SIM-535 (discover-jobs-source): the run's local scratch space. The claim's
+// tracked-links index is written here for the scout to READ, and the scout
+// writes its ONE finds file here for the runner to post back as the result -
+// the spawned agent itself never talks to the cloud. Paths are runner-chosen
+// (never payload-driven) and the dir is per-claim, so runs cannot collide.
+function prepareSourceRunWorkdir(job) {
+  const dir = path.join(os.tmpdir(), "jobhunt-runner", job.id);
+  fs.mkdirSync(dir, { recursive: true });
+  const trackedLinksFile = path.join(dir, "tracked-links.json");
+  const findsFile = path.join(dir, "finds.json");
+  const links = Array.isArray(job.payload && job.payload.trackedLinks) ? job.payload.trackedLinks : [];
+  fs.writeFileSync(trackedLinksFile, JSON.stringify(links, null, 2), "utf8");
+  try {
+    fs.rmSync(findsFile, { force: true }); // never let a stale finds file pass as this run's output
+  } catch {}
+  return { dir, trackedLinksFile, findsFile };
+}
+
+// Read + trim the finds file to fit the cloud's 100kb JSON body cap: drop tail
+// finds (never counters) until it fits, loudly. Returns null when the file is
+// missing/unparseable - the cloud records that honestly as an incomplete run.
+const RESULT_MAX_BYTES = 90_000;
+function collectSourceRunResult(findsFile) {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(findsFile, "utf8"));
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const result = { counters: parsed.counters || {}, finds: Array.isArray(parsed.finds) ? parsed.finds : [] };
+  while (JSON.stringify(result).length > RESULT_MAX_BYTES && result.finds.length) {
+    result.finds.pop();
+    result.truncated = (result.truncated || 0) + 1;
+  }
+  if (result.truncated) console.warn(`runner: finds payload over ${RESULT_MAX_BYTES}B - dropped ${result.truncated} tail find(s)`);
+  return result;
+}
+
+function runClaudeLocally(ctx, kind, jobId, payload, onLine, promptOpts = {}) {
   return new Promise((resolve) => {
-    const prompt = buildRunnerPrompt(kind, jobId, payload); // MF-1: fixed template + data
+    const prompt = buildRunnerPrompt(kind, jobId, payload, promptOpts); // MF-1: fixed template + data
     const agent = RUNNER_KIND_AGENT[kind];
     const args = [
       "-p", prompt,
@@ -207,6 +246,9 @@ async function processJob(ctx, job) {
   }
   const folderPath = jobId ? path.join(ctx.jobsDir, jobId) : null;
   const before = folderPath ? snapshotFolder(folderPath) : {};
+  // SIM-535: a source-scoped discovery run gets a per-claim scratch dir; its
+  // finds file becomes the result payload instead of artifacts.
+  const sourceRun = kind === "discover-jobs-source" ? prepareSourceRunWorkdir(job) : null;
   const hb = setInterval(() => heartbeat(ctx, id), HEARTBEAT_MS);
   hb.unref?.();
   let code = 1;
@@ -219,7 +261,7 @@ async function processJob(ctx, job) {
         headers: { authorization: `Bearer ${ctx.token}`, "content-type": "application/json" },
         body: JSON.stringify({ lines: [t.slice(0, 500)] }),
       }).catch(() => {});
-    });
+    }, sourceRun ? { trackedLinksFile: sourceRun.trackedLinksFile, findsFile: sourceRun.findsFile } : {});
   } finally {
     clearInterval(hb);
   }
@@ -240,7 +282,15 @@ async function processJob(ctx, job) {
       }
     }
   }
-  await postResult(ctx, id, nonce, code === 0 ? "done" : "failed", code === 0 ? null : `local run exited ${code}`);
+  // SIM-535: a successful source run posts its finds file as the result; a
+  // missing/unparseable file posts result:null and the cloud records the run
+  // as incomplete (honest - never a fake success over unseen finds).
+  let result = null;
+  if (sourceRun && code === 0) {
+    result = collectSourceRunResult(sourceRun.findsFile);
+    if (!result) console.warn(`runner: no readable finds file at ${sourceRun.findsFile}`);
+  }
+  await postResult(ctx, id, nonce, code === 0 ? "done" : "failed", code === 0 ? null : `local run exited ${code}`, result);
   console.log(`runner: job ${id} (${kind}) finished code=${code}`);
 }
 
@@ -297,4 +347,4 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   });
 }
 
-export { collectOutputs, snapshotFolder };
+export { collectOutputs, snapshotFolder, prepareSourceRunWorkdir, collectSourceRunResult };
