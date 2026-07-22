@@ -307,8 +307,9 @@ export function generate(seedVersion = 1, { refDate = null } = {}) {
   // page is not blank"). Shaped like the workbook's discoveries rows (the
   // Discovery/Triage UI's `Discovery` type). Served by the server's demo-mode
   // readDiscovery branch - deliberately NOT written through the store seam
-  // (there is no finds store method; the demo derives them from this generator
-  // on read, exactly as deterministic as the rest of the seed). All fictional.
+  // (the demo derives them from this generator on read, exactly as
+  // deterministic as the rest of the seed, and its readDiscovery branch runs
+  // BEFORE the SIM-547 discovery_finds table branch). All fictional.
   const findRow = (daysAgo, n, { title, employer, sector, track, sourceIdx, decision, tracked = false }) => ({
     "Date Found": dateStamp(daysAgo),
     Title: title,
