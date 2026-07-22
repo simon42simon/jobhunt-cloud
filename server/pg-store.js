@@ -1051,6 +1051,33 @@ export class PgStore {
     return out;
   }
 
+  // Owner-initiated cancel of a still-queued job (SIM-543) - mirror of
+  // store.js: only "queued" cancels (claimed jobs belong to the laptop,
+  // outbound-only); terminal is an idempotent no-op; the canceled row uses the
+  // existing "failed" terminal with the reason in `error`. The status guard in
+  // the UPDATE's WHERE makes a cancel racing a claim lose cleanly.
+  cancelAgentJob(id) {
+    let out = { ok: false, notFound: true };
+    this._tx(() => {
+      const row = this._one("select id, status from agent_jobs where id=$1", [id]);
+      if (!row) return;
+      if (row.status === "done" || row.status === "failed" || row.status === "dead") {
+        out = { ok: true, idempotent: true, status: row.status };
+        return;
+      }
+      if (row.status !== "queued") {
+        out = { ok: false, claimed: true, status: row.status };
+        return;
+      }
+      const r = this.pg.query(
+        `update agent_jobs set status='failed', error=$1, nonce=null, updated_at=now() where id=$2 and status='queued'`,
+        ["canceled by owner before a runner claimed it", id],
+      );
+      out = r && r.rowCount === 0 ? { ok: false, claimed: true, status: "claimed" } : { ok: true, status: "failed" };
+    });
+    return out;
+  }
+
   runnerQueueState() {
     const rows = this._all("select status, count(*)::int as n from agent_jobs group by status", []);
     const counts = { queued: 0, claimed: 0, running: 0, done: 0, failed: 0, dead: 0 };

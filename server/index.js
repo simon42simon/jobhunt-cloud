@@ -628,11 +628,27 @@ function runnerAuth(req, res, next) {
 
 // Registered BEFORE the cookie auth gate (see the auth block above) so a tokened
 // runner is not blocked by the missing session cookie.
+// SIM-543: the newest moment ANY authenticated laptop runner asked for work.
+// In-memory on purpose - it answers "is a runner connected RIGHT NOW", which a
+// restart legitimately resets (a fresh container has not seen a poll yet).
+// Consumed by the run-status bridge below so a queued run can say "no laptop
+// runner connected" instead of impersonating progress.
+let lastRunnerPollAt = null;
+const RUNNER_POLL_STALE_MS = 90_000; // ~6 poll intervals; beyond this the runner is "not connected"
+
+function runnerLivenessNote() {
+  if (!lastRunnerPollAt) return "No laptop runner connected since this server started — start it on the laptop (ops/agent-runner.mjs)";
+  const ageS = Math.round((Date.now() - lastRunnerPollAt) / 1000);
+  if (ageS * 1000 > RUNNER_POLL_STALE_MS) return `No laptop runner connected — last seen ${ageS}s ago; start it on the laptop (ops/agent-runner.mjs)`;
+  return "Waiting for the laptop runner to pick this up";
+}
+
 function mountRunnerRoutes() {
   // Claim the next queued job (outbound pull). FOR UPDATE SKIP LOCKED in PgStore
   // makes a double-claim structurally impossible; 204 when the queue is empty.
   app.get("/api/runner/jobs/next", runnerAuth, (req, res) => {
     try {
+      lastRunnerPollAt = Date.now(); // SIM-543 liveness: a poll = a connected runner, claim or not
       const claim = store.claimAgentJob(req.runnerId);
       if (!claim) return res.status(204).end();
       // SIM-535: a source-scoped discovery claim is enriched AT CLAIM TIME with

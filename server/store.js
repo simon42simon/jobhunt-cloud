@@ -1158,6 +1158,29 @@ export class FileStore {
     return { ok: true, jobId: rec.jobId, kind: rec.kind };
   }
 
+  // Owner-initiated cancel of a job NO runner has claimed yet (SIM-543). Only a
+  // "queued" row can be canceled - once claimed, the laptop owns it and the
+  // cloud has no control channel in (outbound-only, MF-6); the Stop endpoint
+  // answers that case with an honest 409 instead. Terminal states are an
+  // idempotent no-op so a double-click can never error. The canceled row lands
+  // in the existing "failed" terminal (no new enum for every consumer to
+  // learn), with the reason in `error` for the record flip to carry.
+  cancelAgentJob(id) {
+    const data = this._loadAgentJobs();
+    const rec = data.jobs.find((j) => j.id === id);
+    if (!rec) return { ok: false, notFound: true };
+    if (rec.status === "done" || rec.status === "failed" || rec.status === "dead") {
+      return { ok: true, idempotent: true, status: rec.status };
+    }
+    if (rec.status !== "queued") return { ok: false, claimed: true, status: rec.status };
+    rec.status = "failed";
+    rec.error = "canceled by owner before a runner claimed it";
+    rec.nonce = null;
+    rec.updatedAt = new Date().toISOString();
+    this._saveAgentJobs(data);
+    return { ok: true, status: "failed" };
+  }
+
   // Honest laptop-off pending state (design 4.6): counts by status + the newest
   // heartbeat, so the UI can distinguish "runner polling" from "laptop offline".
   runnerQueueState() {
