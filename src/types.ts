@@ -772,6 +772,10 @@ export interface RunStats {
   durationMs: number | null;
   numTurns: number | null;
   costUsd: number | null;
+  // SIM-574 (JP-2): token usage, when the CLI emits a `usage` block (real
+  // invocations - not the demo's hand-authored transcripts). null when absent,
+  // never fabricated. Not yet surfaced in RunPanel (backend-only so far).
+  tokens: { input: number | null; output: number | null; cacheRead: number | null; cacheCreate: number | null } | null;
 }
 
 export interface RoutineRun {

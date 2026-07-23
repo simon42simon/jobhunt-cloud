@@ -1158,6 +1158,16 @@ export class PgStore {
     };
   }
 
+  // SIM-596 (JP-4): mirrors store.js's hasPendingAgentJob (the nightly auto-
+  // draft scheduler's "skip already-pending" dedupe guard) - see its comment.
+  hasPendingAgentJob(jobId, kind) {
+    const row = this._one(
+      "select 1 from agent_jobs where job_id=$1 and kind=$2 and status in ('queued','claimed','running') limit 1",
+      [jobId, kind],
+    );
+    return !!row;
+  }
+
   completeAgentJob(id, { runnerId, nonce, status, error = null, result = null }) {
     let out = { ok: false, reason: "agent job not found", notFound: true };
     this._tx(() => {
@@ -1184,6 +1194,27 @@ export class PgStore {
     });
     return out;
   }
+
+  // NOTE (SIM-544 / JP-1): PgStore deliberately does NOT implement
+  // getTrackPack/putTrackPack (server/store.js's FileStore does - see its
+  // "TRACK PACKS" section for the contract). A durable cloud-side track-pack
+  // cache needs a new table:
+  //   CREATE TABLE track_packs (
+  //     cache_key   text PRIMARY KEY,     -- `<track>:<factsHash>`
+  //     track       text NOT NULL,
+  //     facts_hash  text NOT NULL,
+  //     style_digest text,
+  //     blocks      jsonb NOT NULL,
+  //     created_at  timestamptz NOT NULL DEFAULT now(),
+  //     updated_at  timestamptz NOT NULL DEFAULT now()
+  //   );
+  // Adding that migration is OUT OF FENCE for the lane that wrote this
+  // (jp-pipeline writes only server/, src/, tests/, docs/agent-pipeline.md -
+  // migrations/ is not in that allowlist) - routed to the integrator/a
+  // migration-authorized lane. Until it lands, server/index.js's
+  // STORE_TRACK_PACKS capability probe (`typeof store.getTrackPack ===
+  // "function"`) is false on PgStore, and the /api/track-packs/* routes
+  // answer an honest 501 rather than a silent no-op or a fake success.
 
   // Owner-initiated cancel of a still-queued job (SIM-543) - mirror of
   // store.js: only "queued" cancels (claimed jobs belong to the laptop,

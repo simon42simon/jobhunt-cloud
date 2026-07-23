@@ -83,13 +83,96 @@ wrong; fix the facts). Finalize/submit stays Simon-gated (charter).
 4. **Every run emits one observation** about what to codify next (owner directive) — the
    discovery baseline's source-registry corrections are the model.
 
+## Implementation status (jp-pipeline lane, SIM-544 → SIM-574 → SIM-596, 2026-07-23)
+
+The reuse machinery, self-reporting, and nightly scheduler are now real code in
+`jobhunt-cloud` — with two honest, flagged gaps where the work crosses this lane's fence
+(`server/`, `src/`, `tests/`, `docs/agent-pipeline.md` only — never `ops/`, migrations, or
+another repo). Routed to the integrator/a follow-up lane rather than worked around.
+
+**SIM-544 — track-pack cache (`server/track-pack-lib.js`, `server/store.js`,
+`server/pg-store.js`, `GET`/`PUT /api/track-packs/:cacheKey`):**
+
+- Cache key is exactly `<track>:<factsHash>` (`buildTrackPackCacheKey`) — the CALLER (the
+  application-writer skill, which alone can see `ops/facts/*.yaml`) computes `factsHash` off
+  the facts files' bytes and PUTs the resulting stable blocks; this cloud store never sees
+  facts content, only the caller-computed hash. A facts edit produces a new hash → a new key →
+  the OLD key's pack simply goes unreachable — invalidation is implicit in the hash, never an
+  explicit delete, exactly the "cache key = hash of facts + track id" rule above.
+- **`styleDigest` (the ticket title's "style-digest threading") has no prior art anywhere in
+  this repo or company-os** — the ticket body and this doc never define it beyond the title.
+  Implemented as an opaque, caller-computed string threaded alongside the content hash,
+  inferred to mean a fingerprint of the VOICE/tone choices baked into a pack's blocks (not the
+  facts themselves) — **this is inference, not confirmed spec; flag it with the ticket author
+  before a real caller depends on the distinction** (`server/track-pack-lib.js` header has the
+  full reasoning).
+- **FileStore is fully live** (`track-packs.json`, content-addressed). **PgStore deliberately
+  does NOT implement it yet** — a durable cloud cache needs a new `track_packs` table, and
+  `migrations/` is not in this lane's writable allowlist. `server/pg-store.js` carries the
+  exact `CREATE TABLE` this needs, ready for the integrator/a migration-authorized lane. Until
+  it lands, `GET`/`PUT /api/track-packs/*` answer an honest `501 TRACK_PACK_STORE_UNAVAILABLE`
+  on the cloud (capability-probed via `typeof store.getTrackPack === "function"`, the exact
+  SIM-547 `STORE_FINDS` pattern) rather than a silent no-op.
+- **Wiring the `first-draft-job` skill (company-os) to actually CALL this cache is separate,
+  cross-repo work** — tracked as its own ticket (SIM-597, JP-5: re-home jobhunt product skills)
+  precisely because a jobhunt-cloud lane cannot carry a company-os + vault change. This lane
+  built the machinery the skill will call into; it did not touch the skill itself.
+
+**SIM-574 — run-economics self-reporting (`server/lib.js` `agentEventToUpdate`,
+`server/runner-lib.js` `validateRunEconomics`, the `POST /api/runner/jobs/:id/result` route):**
+
+- `tokens`/`wallMs` are DERIVED server-side from the run's own durable `agent_jobs.progress` —
+  the SAME terminal stream-json `result` event the runner already relays verbatim
+  (`ops/agent-runner.mjs`'s existing relay, untouched) — never trusted from the request body.
+  Honest capture: an absent `usage` block yields `tokens: null`, never a fabricated number.
+- `reuseHitRate`/`cacheKeyProvenance` come from the track-pack routes above: a GET/PUT tagged
+  with `?agentJobId=` accumulates a per-run hit/miss signal, folded into the result the moment
+  it completes. Real numbers the instant the SIM-597 skill wiring starts calling the cache —
+  `undefined` (never a fake `0`) until then, since there is nothing to report yet.
+- Lands in the EXISTING SIM-535 result lane (`agent_jobs.result` jsonb) — no migration, no
+  parallel reporting path, per the lane directive.
+
+**SIM-596 — nightly auto-draft scheduler (`server/lib.js` `todayET`/
+`msUntilNextAutoDraftFire`/`selectAutoDraftCandidates`, `server/index.js`
+`runAutoDraftScheduler`, `POST /api/auto-draft/fire`):**
+
+- Selection is 100% deterministic: `status="queued"` AND `hasCV=false` AND a literal
+  `YYYY-MM-DD` deadline within `[today, today+3]` ET AND `sector != "private"` (v1 scope:
+  deadline-driven public jobs only). Dedupe against an already-pending `first-draft-job`
+  happens BEFORE the nightly cap (10), never after — an already-queued job must never occupy a
+  cap slot a fresh job could use. Overflow past the cap is a logged count, never a silent drop.
+- ET timezone math (`todayET`, `msUntilNextAutoDraftFire`) is built on `Intl.DateTimeFormat`,
+  **deliberately NOT the `Temporal` API** — available on a developer's local Node, but the
+  Dockerfile pins `node:20-bookworm-slim` for the actual deployment, where `Temporal` does not
+  exist; using it would pass every local test and throw in production. Self-rearming
+  (`setTimeout` chain, each firing recomputing the next 2am ET fresh) rather than a fixed
+  `setInterval`, so a DST transition self-corrects the next night instead of drifting.
+- **SHIP DARK**: the nightly timer only arms behind `AUTO_DRAFT_ENABLED=1` — it must not fire
+  on a real schedule until SIM-598 (the fail-closed generation-quality gate) lands, so an
+  unattended run can never scale an unenforced 2-page cap. The secret-gated manual-fire
+  endpoint (`X-Auto-Draft-Fire-Secret`, constant-time compare, mirrors the demo-reset endpoint
+  exactly) works regardless, for staging proof.
+- Enqueues at the batch tier (`ROUTINES["first-draft-job"].batchModel`/`batchEffort` —
+  sonnet/medium) via `agent_jobs.payload.{tier,model,effort}` — **but this is INTENT ONLY on
+  the runner-queue path today.** `ops/agent-runner.mjs` (out of this lane's fence) does not yet
+  read a tier field off the payload and append `--model`/`--effort` the way the LOCAL-spawn
+  path's `startRun` does; only `--agent` is applied runner-side. Threading the field now costs
+  nothing and makes the follow-up (teaching `ops/agent-runner.mjs` to honor it) additive, not a
+  payload-shape change — until that lands, an auto-drafted job runs at whatever tier the
+  runner's own defaults give `first-draft-job`.
+- Never touches finalize/submit — the only kind this ever enqueues is `first-draft-job`.
+
 ## Measured-baseline gaps (for the implementation Rodeo)
 
 - Draft-stage **per-section regenerated-identically evidence** is not yet measured: the two
   baseline runs predate section instrumentation. Next batch must diff artifacts across jobs of
   the SAME track to measure the identical-block share (the number that proves the track-pack
-  saving; target ≥30% cheaper at owner-confirmed equal quality — SIM-420 acceptance).
-- Draft/final **token counts** are not captured on the runner path (the local path's
-  stream-json `stats` event has no runner twin yet) — cross-stage rule 3 closes this.
-- The measured A/B (codified vs full run) stays gated on the owner's 2026-07-21 decision:
-  real-data cloud production runs only, no local/demo stopgap.
+  saving; target ≥30% cheaper at owner-confirmed equal quality — SIM-420 acceptance). Blocked
+  on SIM-597 (the skill actually calling the SIM-544 cache) — the machinery alone produces no
+  reuse data to measure.
+- ~~Draft/final **token counts** are not captured on the runner path~~ **CLOSED by SIM-574** —
+  see "Implementation status" above.
+- The measured A/B (codified vs full run, SIM-575/JP-3) stays gated on the owner's 2026-07-21
+  decision: real-data cloud production runs only, no local/demo stopgap. Also now gated on
+  SIM-596 producing enough auto-drafted volume to compare against, and on SIM-598 (quality
+  gate) landing first so neither arm of the A/B is measuring an unenforced 2-page violation.

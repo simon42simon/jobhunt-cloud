@@ -129,6 +129,45 @@ export function validateSourceRunResult(result) {
   return { ok: true, counters, finds };
 }
 
+// Bounds for a job-scoped generation run's self-reported economics (SIM-574 /
+// JP-2, docs/agent-pipeline.md cross-stage rule 3: "every run reports its own
+// economics"). tokens/wallMs are DERIVED server-side from the run's own
+// stream-json terminal event (server/index.js's deriveRunEconomicsFromProgress,
+// reusing agentEventToUpdate) - never trusted from the runner request body - so
+// this validator's real job is bounding the reuse-signal fields the track-pack
+// routes (SIM-544) contribute.
+export const RUN_ECONOMICS_MAX_CACHE_KEYS = 20;
+
+// Validate + sanitize a run-economics payload ({ tokens?, wallMs?, reuseHitRate?,
+// cacheKeyProvenance? }). Pure and strict-but-forgiving: an absent/malformed
+// field is simply dropped, never fabricated (the "unreported, never fake"
+// posture the source-run ingest already uses for leadsFound). Returns the
+// sanitized object, or null when nothing usable survived.
+export function validateRunEconomics(econ) {
+  if (!econ || typeof econ !== "object" || Array.isArray(econ)) return null;
+  const out = {};
+  if (econ.tokens && typeof econ.tokens === "object" && !Array.isArray(econ.tokens)) {
+    const tokens = {};
+    for (const key of ["input", "output", "cacheRead", "cacheCreate"]) {
+      const v = Number(econ.tokens[key]);
+      if (Number.isFinite(v) && v >= 0) tokens[key] = Math.floor(v);
+    }
+    if (Object.keys(tokens).length) out.tokens = tokens;
+  }
+  if (Number.isFinite(econ.wallMs) && econ.wallMs >= 0) out.wallMs = Math.floor(econ.wallMs);
+  if (Number.isFinite(econ.reuseHitRate) && econ.reuseHitRate >= 0 && econ.reuseHitRate <= 1) {
+    out.reuseHitRate = econ.reuseHitRate;
+  }
+  if (Array.isArray(econ.cacheKeyProvenance)) {
+    const keys = econ.cacheKeyProvenance
+      .filter((k) => typeof k === "string" && k.trim())
+      .slice(0, RUN_ECONOMICS_MAX_CACHE_KEYS)
+      .map((k) => k.trim().slice(0, 200));
+    if (keys.length) out.cacheKeyProvenance = keys;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 // Build the LOCAL claude prompt for a claimed job. MF-1: the prompt is a FIXED
 // template; the only free-text that crosses is the job folder id + an optional owner
 // note, interpolated as DATA (quoted), never as a command. The routine's file-read

@@ -42,6 +42,11 @@ import {
   medianMs,
   resolveUploadPolicy,
   DRAFT_ROUTINE,
+  // SIM-596 (JP-4): the nightly auto-draft scheduler's pure selection/timing
+  // helpers - see server/lib.js "SIM-596 nightly auto-draft scheduler" header.
+  todayET,
+  msUntilNextAutoDraftFire,
+  selectAutoDraftCandidates,
 } from "./lib.js";
 // Boot-time orphaned-run reconcile (SIM-70): the SAME core the standalone CLI
 // (ops/activity-log-reconcile.mjs) runs. A restart mid-run orphans the old
@@ -88,7 +93,14 @@ import {
   DEADLINE_CONTRACT_RULE,
   FETCH_MODE_PROMPTS,
   validateSourceRunResult,
+  // SIM-574 (JP-2): job-scoped generation runs self-report economics through
+  // this SAME result lane - the validator lives beside validateSourceRunResult
+  // since it is the direct template for it.
+  validateRunEconomics,
 } from "./runner-lib.js";
+// SIM-544 (JP-1): the track-pack reuse-machinery's pure cache-key/hash/style-
+// digest helpers - see server/track-pack-lib.js header for the concept.
+import { validateTrackPackPayload } from "./track-pack-lib.js";
 // SIM-393 I1 - vault->cloud sync ingest surface. The ONE shared name validator
 // (guardian GC-1) + the sync content helpers, reused by the /api/sync/* routes.
 import { isSafeName } from "./name-safety.js";
@@ -608,6 +620,39 @@ const RUNNER_AUTH_MAX_FAILURES = 20; // per IP per window before a 429 (MF-5)
 const RUNNER_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
 const runnerAuthFailures = new Map(); // ip -> { count, resetAt }
 
+// SIM-547-style capability gate: PgStore does not implement the track-pack
+// cache yet (server/pg-store.js's NOTE near completeAgentJob has the migration
+// this needs - out of this lane's fence); FileStore does (server/store.js
+// "TRACK PACKS" section). The /api/track-packs/* routes below answer an
+// honest 501 when this is false rather than a silent no-op.
+const STORE_TRACK_PACKS = typeof store.getTrackPack === "function";
+
+// SIM-544 track-pack reuse signal, correlated by agentJobId (an optional
+// ?agentJobId= query param the caller supplies - itself just a correlation
+// label under the runnerAuth bearer, so a mislabel only pollutes THAT
+// caller's own run's economics, never another run's). Ephemeral like the
+// `runs` Map / run.stats (SIM-574 accepts the same restart-loses-it caveat
+// those already carry) - read once at /result time, then discarded. Bounded
+// so a chatty/misbehaving caller cannot leak memory.
+const trackPackReuseSignal = new Map(); // agentJobId -> { hits, misses, cacheKeys: [] }
+const TRACK_PACK_SIGNAL_MAX_ENTRIES = 500;
+const TRACK_PACK_SIGNAL_MAX_KEYS = 20;
+function noteTrackPackSignal(agentJobId, hit, cacheKey) {
+  const id = typeof agentJobId === "string" ? agentJobId.trim().slice(0, 200) : "";
+  if (!id) return;
+  let rec = trackPackReuseSignal.get(id);
+  if (!rec) {
+    if (trackPackReuseSignal.size >= TRACK_PACK_SIGNAL_MAX_ENTRIES) return; // bounded - drop, never grow unbounded
+    rec = { hits: 0, misses: 0, cacheKeys: [] };
+    trackPackReuseSignal.set(id, rec);
+  }
+  if (hit) rec.hits += 1;
+  else rec.misses += 1;
+  if (cacheKey && rec.cacheKeys.length < TRACK_PACK_SIGNAL_MAX_KEYS && !rec.cacheKeys.includes(cacheKey)) {
+    rec.cacheKeys.push(String(cacheKey).slice(0, 200));
+  }
+}
+
 // Runner bearer-token gate (MF-5): 501 unless the runner is enabled (real mode +
 // RUNNER_TOKEN_HASH), constant-time token verify, and a per-IP failure counter so
 // /api/runner/jobs/next cannot be used as a brute-force oracle.
@@ -678,6 +723,36 @@ function queuedRunnerView(aj) {
   }
   if (!runnerConnected()) return { status: "waiting-for-runner", currentActivity: runnerLivenessNote() };
   return { status: "running", currentActivity: runnerLivenessNote() };
+}
+
+// SIM-574 (JP-2): derive a job-scoped run's self-reported economics from its
+// OWN durable progress lines (agent_jobs.progress jsonb) - the terminal
+// stream-json `result` event the runner already relays verbatim to /progress
+// (ops/agent-runner.mjs's onLine callback), reused here rather than trusting
+// anything the runner's /result body claims. Reads the STORED progress, not
+// the ephemeral `runs` Map, so this works even when this server instance
+// never saw the run live (a restart, or a different instance behind the
+// load balancer). Pure best-effort: a missing/unparseable terminal event
+// yields null, never a thrown error - deriving economics must never block a
+// result from landing (docs/agent-pipeline.md "unreported, never fake").
+function deriveRunEconomicsFromProgress(progress) {
+  const arr = Array.isArray(progress) ? progress : [];
+  let stats = null;
+  for (const line of arr) {
+    const t = String(line).trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const evt = JSON.parse(t);
+      if (evt && evt.type === "result") {
+        const upd = agentEventToUpdate(evt, null, 0, true);
+        if (upd.stats) stats = upd.stats;
+      }
+    } catch {
+      /* not a parseable event - skip */
+    }
+  }
+  if (!stats) return null;
+  return { tokens: stats.tokens || null, wallMs: stats.durationMs };
 }
 
 function mountRunnerRoutes() {
@@ -785,14 +860,75 @@ function mountRunnerRoutes() {
     },
   );
 
+  // Track-pack cache (SIM-544 / JP-1): content-addressed GET/PUT for the
+  // facts-stable generation blocks a draft run reuses across every job on the
+  // same track (docs/agent-pipeline.md "module split"). Cache key = <track>:
+  // <factsHash> (server/track-pack-lib.js) - the CALLER computes factsHash off
+  // ops/facts/*.yaml bytes (which never leave the laptop); this cloud store
+  // never sees facts content, only the caller-computed hash + the resulting
+  // blocks. runnerAuth-gated: only an authenticated agent run may read/write
+  // the cache (same outbound-only bearer lane as every other runner call).
+  // Capability-gated on STORE_TRACK_PACKS: PgStore does not implement this yet
+  // (see server/pg-store.js's NOTE - a migration out of this lane's fence), so
+  // a cloud deployment answers an honest 501 rather than a silent no-op.
+  app.get("/api/track-packs/:cacheKey", runnerAuth, (req, res) => {
+    if (!STORE_TRACK_PACKS) {
+      return res.status(501).json({ error: "track-pack cache is not available on this store backend", code: "TRACK_PACK_STORE_UNAVAILABLE" });
+    }
+    const pack = store.getTrackPack(req.params.cacheKey);
+    noteTrackPackSignal(req.query.agentJobId, !!pack, req.params.cacheKey);
+    if (!pack) return res.status(404).json({ error: "no cached pack for this key" });
+    res.json({ ok: true, pack });
+  });
+
+  app.put("/api/track-packs/:cacheKey", runnerAuth, (req, res) => {
+    if (!STORE_TRACK_PACKS) {
+      return res.status(501).json({ error: "track-pack cache is not available on this store backend", code: "TRACK_PACK_STORE_UNAVAILABLE" });
+    }
+    const v = validateTrackPackPayload(req.body, JOB_ENUM_FIELDS.track);
+    if (!v.ok) return res.status(400).json({ error: v.reason });
+    if (v.pack.cacheKey !== req.params.cacheKey) return res.status(400).json({ error: "cacheKey mismatch between URL and body" });
+    const saved = store.putTrackPack(req.params.cacheKey, v.pack);
+    // A PUT is definitionally a miss-then-fill for THIS run (it just built the
+    // pack fresh rather than reusing one) - counted as a miss regardless of
+    // whether an older pack existed under a different (now-stale) key.
+    noteTrackPackSignal(req.query.agentJobId, false, req.params.cacheKey);
+    res.status(201).json({ ok: true, pack: saved });
+  });
+
   // Finalize the job (idempotent, replay-safe). Validates the nonce + claimed-by;
   // a repeat result for a terminal job is a 200 no-op. SIM-535: the body may
   // carry a `result` payload (bounded by the global 100kb JSON cap; the runner
   // trims to fit) - for discover-jobs-source it is the {counters, finds} the
   // ingest below files; the replay-safe idempotent branch NEVER re-ingests.
+  // SIM-574 (JP-2): for job-scoped generation kinds, self-reported economics
+  // (tokens/wallMs derived server-side from the run's OWN progress, never
+  // trusted from this request body; reuseHitRate/cacheKeyProvenance from the
+  // track-pack signal above) are merged into the result BEFORE it lands, so
+  // agent_jobs.result durably carries them through this SAME result lane.
   app.post("/api/runner/jobs/:id/result", runnerAuth, (req, res) => {
     const { nonce, status, error, result } = req.body || {};
-    const bounded = result && typeof result === "object" && !Array.isArray(result) ? result : null;
+    let bounded = result && typeof result === "object" && !Array.isArray(result) ? result : null;
+    try {
+      const ajBefore = store.agentJobById(req.params.id);
+      if (ajBefore && (ajBefore.kind === "first-draft-job" || ajBefore.kind === "finalize-job")) {
+        const derived = deriveRunEconomicsFromProgress(ajBefore.progress);
+        const reuse = trackPackReuseSignal.get(req.params.id);
+        const totalLookups = reuse ? reuse.hits + reuse.misses : 0;
+        const econ = validateRunEconomics({
+          tokens: derived && derived.tokens,
+          wallMs: derived && derived.wallMs,
+          reuseHitRate: totalLookups > 0 ? reuse.hits / totalLookups : null,
+          cacheKeyProvenance: reuse ? reuse.cacheKeys : null,
+        });
+        if (econ) bounded = { ...(bounded || {}), economics: econ };
+        trackPackReuseSignal.delete(req.params.id);
+      }
+    } catch (e) {
+      // Guarded like the ingest/sync calls below: a derive hiccup must never
+      // turn a delivered result into a runner-side retry.
+      console.error(`[jobhunt] run-economics derive failed for ${req.params.id}: ${e && e.message ? e.message : e}`);
+    }
     const r = store.completeAgentJob(req.params.id, { runnerId: req.runnerId, nonce, status, error, result: bounded });
     if (r.notFound) return res.status(404).json({ error: r.reason });
     if (!r.ok) return res.status(403).json({ error: r.reason });
@@ -818,6 +954,110 @@ function mountRunnerRoutes() {
     }
     if (r.jobId) broadcast({ type: "jobs-changed" }); // cloud has no watcher; nudge the UI
     res.json({ ok: true, idempotent: !!r.idempotent });
+  });
+}
+
+// ---- nightly auto-draft scheduler (SIM-596 / JP-4, owner-inserted 2026-07-23) ----
+// Extends the SAME outbound runner queue every other kind uses - no new dispatch
+// path. "The trigger is 100% deterministic code (SQL query + queue insert) - no
+// LLM decides when or what to run" (the ticket, extending docs/agent-pipeline.md's
+// doctrine to scheduling). SHIP DARK: the nightly timer only arms behind
+// AUTO_DRAFT_ENABLED=1 (see the boot block below) - it must not fire on a real
+// schedule until SIM-598 (the fail-closed quality gate) lands; this function and
+// the manual-fire endpoint below work regardless, for staging proof.
+const AUTO_DRAFT_WINDOW_DAYS = 3;
+const AUTO_DRAFT_CAP = 10;
+
+// Batch tier for an auto-drafted job (ROUTINES["first-draft-job"].batchModel/
+// batchEffort - "sonnet/medium", the SAME carve-out startRun applies to a large
+// local-spawn batch). NOTE: this is INTENT ONLY on the runner-queue path today -
+// ops/agent-runner.mjs (out of this lane's fence) does not yet read a tier field
+// off agent_jobs.payload and append --model/--effort the way the LOCAL-spawn
+// path's startRun does; only --agent is applied runner-side (runner-lib.js
+// RUNNER_KIND_AGENT). Threading the field now costs nothing and makes the
+// follow-up (wiring ops/agent-runner.mjs to honor it) additive, not a payload-
+// shape change. Until that lands, an auto-drafted job runs at whatever tier the
+// runner's own defaults give first-draft-job.
+function autoDraftBatchTierPayload() {
+  const def = ROUTINES["first-draft-job"] || {};
+  return { note: "auto-drafted (SIM-596 nightly scheduler)", tier: "batch", model: def.batchModel || null, effort: def.batchEffort || null };
+}
+
+// The scheduler's one entry point - called by BOTH the nightly timer and the
+// secret-gated manual-fire endpoint, so there is exactly one code path to keep
+// correct. Guarded per-job (one enqueue failure never sinks the batch) and
+// guarded overall (a store hiccup returns an honest zero-result rather than
+// throwing into a timer callback with no one to catch it). Never touches
+// finalize/submit - the ONLY kind this ever enqueues is "first-draft-job"
+// (charter: those stages stay [SIMON]-gated).
+function runAutoDraftScheduler() {
+  const today = todayET();
+  let jobs = [];
+  try {
+    jobs = store.listJobs();
+  } catch (e) {
+    console.error(`[jobhunt] auto-draft: could not list jobs: ${e && e.message ? e.message : e}`);
+    return { ok: false, drafted: 0, overflow: 0, skippedPending: 0 };
+  }
+  // isPending is applied INSIDE selection, before the cap - an already-
+  // pending job (a prior fire already queued its draft) must never occupy a
+  // cap slot and starve a genuinely new job of it.
+  const isPending = (job) => typeof store.hasPendingAgentJob === "function" && store.hasPendingAgentJob(job.id, "first-draft-job");
+  const { selected, overflow, skippedPending } = selectAutoDraftCandidates(jobs, {
+    todayET: today,
+    windowDays: AUTO_DRAFT_WINDOW_DAYS,
+    cap: AUTO_DRAFT_CAP,
+    isPending,
+  });
+  let drafted = 0;
+  const enqueuedIds = [];
+  for (const job of selected) {
+    try {
+      store.enqueueAgentJob({ kind: "first-draft-job", jobId: job.id, payload: autoDraftBatchTierPayload() });
+      drafted++;
+      enqueuedIds.push(job.id);
+    } catch (e) {
+      console.error(`[jobhunt] auto-draft: enqueue failed for ${job.id}: ${e && e.message ? e.message : e}`);
+    }
+  }
+  if (overflow > 0) {
+    console.warn(`[jobhunt] auto-draft: ${overflow} eligible job(s) exceeded the nightly cap (${AUTO_DRAFT_CAP}) and were NOT enqueued tonight`);
+  }
+  // One activity-log entry per night (docs/agent-pipeline.md cross-stage rule 4:
+  // "every run emits one observation"), regardless of whether anything fired -
+  // an empty night is still evidence the scheduler ran, not silence.
+  try {
+    store.appendActivity({ kind: "auto-draft", date: today, drafted, overflow, skippedPending, jobIds: enqueuedIds });
+  } catch (e) {
+    console.error(`[jobhunt] auto-draft: activity log append failed: ${e && e.message ? e.message : e}`);
+  }
+  if (drafted > 0) broadcast({ type: "jobs-changed" });
+  return { ok: true, drafted, overflow, skippedPending };
+}
+
+// Secret-gated manual-fire (mirrors the demo-reset endpoint above exactly:
+// constant-time compare, registered only when the secret is actually
+// configured - no anonymous surface). Works independent of AUTO_DRAFT_ENABLED
+// so staging can prove the whole path before the nightly timer is trusted to
+// run unattended. Never in demo mode (a demo instance must never touch the
+// real outbound runner queue) and never when the runner itself is not
+// configured on this instance (enqueuing onto a queue nothing will ever claim
+// is pointless accumulation, not "waiting for the laptop" - MF-3 posture).
+if (process.env.AUTO_DRAFT_FIRE_SECRET) {
+  app.post("/api/auto-draft/fire", (req, res) => {
+    const provided = Buffer.from(String(req.get("x-auto-draft-fire-secret") || ""));
+    const expected = Buffer.from(process.env.AUTO_DRAFT_FIRE_SECRET);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+    if (DEMO_MODE) return res.status(501).json({ error: "auto-draft is disabled in demo mode" });
+    if (!runtime.runnerEnabled) return res.status(501).json({ error: "runner is not configured on this instance" });
+    try {
+      res.json(runAutoDraftScheduler());
+    } catch (e) {
+      console.error(`[jobhunt] auto-draft manual-fire failed: ${e && e.message ? e.message : e}`);
+      res.status(500).json({ error: "auto-draft run failed" });
+    }
   });
 }
 
@@ -7149,6 +7389,36 @@ if (process.env.JOBHUNT_TEST !== "1") {
         }
       }, ms).unref();
     }
+  }
+
+  // SIM-596 (JP-4) nightly auto-draft timer - SHIP DARK. Only arms behind
+  // AUTO_DRAFT_ENABLED=1: must not fire on a real schedule until SIM-598 (the
+  // fail-closed generation-quality gate) lands, so an unattended run cannot
+  // scale an unenforced quality bar (owner decision, SIM-596 description).
+  // Never in demo mode or when the runner is not configured (mirrors the
+  // manual-fire endpoint's own gates above). Self-rearming (a chain of
+  // setTimeout, each recomputing msUntilNextAutoDraftFire fresh) rather than a
+  // fixed setInterval - the ET math self-corrects across DST instead of
+  // drifting; .unref() so this timer never keeps the process alive.
+  if (process.env.AUTO_DRAFT_ENABLED === "1" && !DEMO_MODE) {
+    const armAutoDraftTimer = () => {
+      const ms = msUntilNextAutoDraftFire();
+      setTimeout(() => {
+        try {
+          if (runtime.runnerEnabled) {
+            const r = runAutoDraftScheduler();
+            console.log(`[jobhunt] auto-draft: nightly fire - drafted ${r.drafted}, overflow ${r.overflow}, skippedPending ${r.skippedPending}`);
+          } else {
+            console.log("[jobhunt] auto-draft: nightly fire skipped - runner not configured on this instance");
+          }
+        } catch (e) {
+          console.error(`[jobhunt] auto-draft: nightly fire failed: ${e && e.message ? e.message : e}`);
+        } finally {
+          armAutoDraftTimer(); // always re-arm, success or failure
+        }
+      }, ms).unref();
+    };
+    armAutoDraftTimer();
   }
 
   let debounce = null;

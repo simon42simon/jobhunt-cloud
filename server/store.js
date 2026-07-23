@@ -1134,6 +1134,17 @@ export class FileStore {
     return rec ? { ...rec } : null;
   }
 
+  // SIM-596 (JP-4): the nightly auto-draft scheduler's dedupe guard ("skip
+  // already-pending") - is there a live (queued/claimed/running) agent job of
+  // this kind already outstanding for this jobId? Prevents a double-fire (a
+  // restart landing between the nightly timer and a manual-fire, or two
+  // nights' runs overlapping a slow laptop) from queuing the SAME draft twice.
+  hasPendingAgentJob(jobId, kind) {
+    return this._loadAgentJobs().jobs.some(
+      (j) => j.jobId === jobId && j.kind === kind && (j.status === "queued" || j.status === "claimed" || j.status === "running"),
+    );
+  }
+
   completeAgentJob(id, { runnerId, nonce, status, error = null, result = null }) {
     const data = this._loadAgentJobs();
     const rec = data.jobs.find((j) => j.id === id);
@@ -1216,6 +1227,45 @@ export class FileStore {
       if (j.status === "queued" && (!oldestQueuedAt || j.createdAt < oldestQueuedAt)) oldestQueuedAt = j.createdAt;
     }
     return { counts, lastHeartbeatAt, oldestQueuedAt };
+  }
+
+  // ======================================================================
+  // TRACK PACKS (DATA_DIR, track-packs.json) - SIM-544 (JP-1)
+  // ======================================================================
+  // Content-addressed cache of facts-stable generation blocks, keyed by
+  // `<track>:<factsHash>` (server/track-pack-lib.js buildTrackPackCacheKey).
+  // One JSON file, same read-modify-write posture as agent-jobs.json above
+  // (single-process/single-user FileStore - no competing writer). PgStore
+  // does NOT expose these methods yet (a durable cloud cache needs a new
+  // migration, which is out of this lane's fence - docs/agent-pipeline.md);
+  // server/index.js probes `typeof store.getTrackPack === "function"` and
+  // answers an honest 501 when absent, exactly like the SIM-547 STORE_FINDS
+  // capability gate (FileStore/PgStore deliberately expose different method
+  // sets rather than one throwing a fake success).
+
+  get _trackPacksFile() {
+    return path.join(this.dataDir, "track-packs.json");
+  }
+  _loadTrackPacks() {
+    try {
+      const obj = JSON.parse(fs.readFileSync(this._trackPacksFile, "utf8"));
+      return obj && obj.packs && typeof obj.packs === "object" && !Array.isArray(obj.packs) ? obj : { packs: {} };
+    } catch {
+      return { packs: {} };
+    }
+  }
+  getTrackPack(cacheKey) {
+    const rec = this._loadTrackPacks().packs[cacheKey];
+    return rec ? { ...rec } : null;
+  }
+  putTrackPack(cacheKey, pack) {
+    const data = this._loadTrackPacks();
+    const now = new Date().toISOString();
+    const prior = data.packs[cacheKey];
+    data.packs[cacheKey] = { ...pack, cacheKey, createdAt: (prior && prior.createdAt) || now, updatedAt: now };
+    fs.mkdirSync(this.dataDir, { recursive: true });
+    writeFileAtomic(this._trackPacksFile, JSON.stringify(data, null, 2) + "\n");
+    return { ...data.packs[cacheKey] };
   }
 
   // ======================================================================
