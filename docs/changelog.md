@@ -6,6 +6,20 @@ Every shippable change gets an entry. Categories: **Added**, **Changed**, **Secu
 
 ---
 
+## [0.42.0] - 2026-07-23 12:45 ET
+
+R21 truth-proof release — a jobhunt run can no longer lie about its artifacts; the vault mirror is gone.
+
+### Fixed
+- **Draft runs are fail-closed end-to-end on required artifacts (SIM-615 / SIM-613, PR #21).** The runner (`resolveRunOutcome`) sinks a run's reported status whenever a required artifact kind (CV/cover letter) never posted 2xx — a SIM-598 gate rejection (400) now carries its reason into a loud non-success result instead of exiting 0; independently, `/api/runner/jobs/:id/result` re-derives success from `job_files` itself, so a run can no longer claim success the store can't prove (the owner's live candidate-1 evidence, R20 addendum 6). The SIM-598 gate itself is untouched.
+- **Zombie "running" discovery sources self-heal (SIM-612).** A 30-minute age-based backstop (`reconcileStalledSourceRuns`) flips stalled `outcome:"running"` source records to terminal on the next sources read — un-suppressing them from "Discover due" (the 4 stuck 9-day rows clear themselves on first touch).
+- **Applied-on-lead drift is now write-path-impossible (SIM-609, partial).** `PATCH /api/jobs/:id` refuses a new `applied` date on a pre-application status; the 26-row historical cleanup ships as `ops/scripts/fix-609-applied-on-lead.mjs` (dry-run default) pending prod-DB access.
+- **Tests no longer leak the operator's live dataDir (SIM-605).** `loadConfig()` ignores `config.local.json` under `JOBHUNT_TEST=1`.
+- **ChatCapture focus restore (SIM-601, a11y).** Esc/close returns focus to the FAB even when the captured pre-open element went stale (it did, on every close path).
+
+### Removed
+- **The cloud→vault mirror lane is retired outright (SIM-614, vault cord-cut decision 2026-07-23).** `ops/mirror-vault.mjs`, `/api/mirror/*`, `MIRROR_TOKEN(_HASH)` and the demo-isolation axis are deleted (not disabled); shared export-lane code moved to `ops/cloud-client.mjs`; jobhunt-cloud's own skills no longer assume a vault cwd. A guardrail test keeps the mirror dead.
+
 ## [0.41.1] - 2026-07-23 09:10 ET
 
 ### Fixed
