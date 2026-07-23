@@ -350,6 +350,11 @@ export function lastRunSignalMeta(signal: LastRunSignal): { label: string; color
 // off-token: WCAG contrast-math data, AA-vetted in statusColors.test.ts (not themeable var()) - SIM-43 crux (2026-07-14).
 export const RUN_STATUS_META: Record<RunStatus, { label: string; color: string }> = {
   running: { label: "Running", color: "#a5b4fc" }, // = STATUS_COLOR.planned / --color-accent-text
+  // SIM-562: honestly "nothing is happening yet", not a failure - reuses
+  // DEFAULT_MUTED slate (already vetted via LAST_RUN_SIGNAL_META.quiet).
+  "waiting-for-runner": { label: "Waiting for runner", color: "#a0aec0" },
+  // Needs the owner's attention (re-queue) - reuses the same amber as `stopped`.
+  stalled: { label: "Stalled", color: "#f59e0b" },
   done: { label: "Done", color: "#34d399" }, // = STATUS_COLOR.done emerald
   failed: { label: "Failed", color: "#fda4af" }, // = STATUS_COLOR.blocked rose
   stopped: { label: "Stopped", color: "#f59e0b" }, // = STATUS_COLOR.in_progress amber

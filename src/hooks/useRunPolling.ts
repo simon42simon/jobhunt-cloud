@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
-import type { RoutineRun } from "../types";
+import { isRunPending, type RoutineRun } from "../types";
 
 // The ONE per-run poll loop (t-1783119823228). Lifted verbatim out of
 // RunPanel when the run dock landed, so the expanded panel and the minimized
@@ -31,7 +31,9 @@ export function useRunPolling(runId: string, onFinished: () => void): RoutineRun
         if (!alive) return;
         notFoundStreak.current = 0;
         setRun(r);
-        if (r.status === "running") {
+        // SIM-562: waiting-for-runner / stalled are pending too - only a
+        // terminal status should stop the poll and fire onFinished.
+        if (isRunPending(r.status)) {
           timer = window.setTimeout(poll, 1200);
         } else if (!finishedNotified.current) {
           finishedNotified.current = true;

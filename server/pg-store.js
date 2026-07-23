@@ -1151,6 +1151,10 @@ export class PgStore {
       nonce: row.nonce, claimedBy: row.claimed_by, attempts: row.attempts,
       progress: row.progress || [], result: row.result, error: row.error,
       leaseExpiresAt: row.lease_expires_at, lastHeartbeatAt: row.last_heartbeat_at,
+      // SIM-562: the stalled-threshold clock (server/index.js queuedRunnerView)
+      // reads createdAt off a still-queued row - FileStore's agentJobById always
+      // carried it (a plain object spread); this mirror was missing both.
+      createdAt: row.created_at, updatedAt: row.updated_at,
     };
   }
 
@@ -1204,6 +1208,32 @@ export class PgStore {
         ["canceled by owner before a runner claimed it", id],
       );
       out = r && r.rowCount === 0 ? { ok: false, claimed: true, status: "claimed" } : { ok: true, status: "failed" };
+    });
+    return out;
+  }
+
+  // Owner-initiated re-queue of a run stuck `stalled` (SIM-562) - mirror of
+  // store.js: resets the SAME row's "queued since" clock (created_at) rather
+  // than canceling + minting a fresh id, so every consumer keyed on this runId
+  // keeps working unchanged. Same "queued only" boundary as cancelAgentJob.
+  requeueAgentJob(id) {
+    let out = { ok: false, notFound: true };
+    this._tx(() => {
+      const row = this._one("select id, status from agent_jobs where id=$1", [id]);
+      if (!row) return;
+      if (row.status === "done" || row.status === "failed" || row.status === "dead") {
+        out = { ok: false, terminal: true, status: row.status };
+        return;
+      }
+      if (row.status !== "queued") {
+        out = { ok: false, claimed: true, status: row.status };
+        return;
+      }
+      const r = this.pg.query(
+        `update agent_jobs set created_at=now(), updated_at=now() where id=$1 and status='queued'`,
+        [id],
+      );
+      out = r && r.rowCount === 0 ? { ok: false, claimed: true, status: "claimed" } : { ok: true };
     });
     return out;
   }

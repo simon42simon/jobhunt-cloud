@@ -93,15 +93,18 @@ afterAll(() => {
 });
 
 describe("dispatch", () => {
-  it("routes a job-scoped routine into the runner queue - no local spawn", async () => {
+  it("routes a job-scoped routine into the runner queue - no local spawn, and reports the honest waiting-for-runner state (SIM-562)", async () => {
     const r = await launch("finalize-job", JOB);
     expect(r.status).toBe(201);
     lastRunId = r.body.runId;
     expect(spawnMock).not.toHaveBeenCalled();
     const run = await getRun(lastRunId);
-    expect(run.status).toBe("running");
+    // No runner has EVER polled this app instance: SIM-562's honest substate,
+    // not the SIM-543-era "running" that painted the finalize dialog's
+    // animated bar for an hour with a dead laptop behind it.
+    expect(run.status).toBe("waiting-for-runner");
     expect(run.agentJobId).toMatch(/^aj-/);
-    expect(run.currentActivity).toMatch(/laptop runner/i);
+    expect(run.currentActivity).toMatch(/no laptop runner connected/i);
     // Internal fold cursors never leak onto the wire.
     expect(Object.keys(run).some((k) => k.startsWith("_"))).toBe(false);
   });

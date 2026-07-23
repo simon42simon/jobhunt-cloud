@@ -635,12 +635,42 @@ function runnerAuth(req, res, next) {
 // runner connected" instead of impersonating progress.
 let lastRunnerPollAt = null;
 const RUNNER_POLL_STALE_MS = 90_000; // ~6 poll intervals; beyond this the runner is "not connected"
+// SIM-562: unclaimed this long (regardless of runner liveness) crosses from
+// "honestly waiting" to "the owner should consider re-queuing" - a corpse
+// queued an hour behind a dead laptop must never rely on the owner noticing
+// the banner; the run object itself has to say so.
+const RUNNER_STALLED_MS = Number(process.env.RUNNER_STALLED_MS) || 10 * 60 * 1000; // 10 min
+
+function runnerConnected() {
+  return !!lastRunnerPollAt && Date.now() - lastRunnerPollAt <= RUNNER_POLL_STALE_MS;
+}
 
 function runnerLivenessNote() {
   if (!lastRunnerPollAt) return "No laptop runner connected since this server started — start it on the laptop (ops/agent-runner.mjs)";
-  const ageS = Math.round((Date.now() - lastRunnerPollAt) / 1000);
-  if (ageS * 1000 > RUNNER_POLL_STALE_MS) return `No laptop runner connected — last seen ${ageS}s ago; start it on the laptop (ops/agent-runner.mjs)`;
+  if (!runnerConnected()) {
+    const ageS = Math.round((Date.now() - lastRunnerPollAt) / 1000);
+    return `No laptop runner connected — last seen ${ageS}s ago; start it on the laptop (ops/agent-runner.mjs)`;
+  }
   return "Waiting for the laptop runner to pick this up";
+}
+
+// SIM-562 fix-shape point 1: the honest substate of a QUEUED (unclaimed) agent
+// job, derived from the SAME last-seen fact the banner and runnerLivenessNote
+// use - no new heartbeat. Three bands: past the stalled threshold (owner
+// action available: re-queue) beats runner-disconnected (still just waiting)
+// beats runner-connected-and-about-to-claim-it (reported as plain "running",
+// unchanged pre-SIM-562 behavior - a live runner will get to it).
+function queuedRunnerView(aj) {
+  const queuedSince = Date.parse(aj.createdAt || aj.updatedAt || "");
+  const queuedMs = Number.isFinite(queuedSince) ? Date.now() - queuedSince : 0;
+  if (queuedMs > RUNNER_STALLED_MS) {
+    return {
+      status: "stalled",
+      currentActivity: `Stalled — unclaimed for ${Math.round(queuedMs / 60000)}m; re-queue to try again`,
+    };
+  }
+  if (!runnerConnected()) return { status: "waiting-for-runner", currentActivity: runnerLivenessNote() };
+  return { status: "running", currentActivity: runnerLivenessNote() };
 }
 
 function mountRunnerRoutes() {
@@ -3469,20 +3499,27 @@ function foldRunnerProgress(run, lines) {
 // already true when the auto-advance rule reads the job), and the launch
 // endpoints' sweep below (so a dead laptop can never wedge the concurrency
 // slots or the per-job duplicate guard forever).
+// Returns the still-pending agent-job row (or null) so a caller that needs the
+// SIM-562 display substate (GET /api/routines/run/:runId) does not need a
+// second store read - `run.status` itself deliberately STAYS "running"
+// internally the whole time a job is queued/claimed/running (every dup-guard,
+// concurrency counter, and Stop gate keys off that unchanged fact); only the
+// JSON response the caller builds carries the more specific waiting-for-runner
+// / stalled substate.
 function syncRunnerRoutedRun(run) {
-  if (!run || !run.agentJobId || run.status !== "running") return;
+  if (!run || !run.agentJobId || run.status !== "running") return null;
   let aj = null;
   try {
     aj = store.agentJobById(run.agentJobId);
   } catch {
-    return; // store hiccup: leave the record for a later sync
+    return null; // store hiccup: leave the record for a later sync
   }
   if (aj) foldRunnerProgress(run, aj.progress);
   if (aj && (aj.status === "queued" || aj.status === "claimed" || aj.status === "running")) {
     // Liveness-aware wait note (SIM-543): "queued" with no runner polling is a
     // different owner situation than "queued, runner about to grab it".
     if (aj.status === "queued") run.currentActivity = runnerLivenessNote();
-    return; // genuinely pending
+    return aj; // genuinely pending
   }
   const ok = !!aj && aj.status === "done";
   if (!ok) {
@@ -3867,7 +3904,11 @@ function synthesizeRunnerRun(aj) {
   };
   foldRunnerProgress(pseudo, aj.progress);
   if (aj.status === "queued") {
-    pseudo.currentActivity = runnerLivenessNote();
+    // SIM-562: a distinct status (waiting-for-runner / stalled), not just a
+    // reworded "running" - see queuedRunnerView.
+    const view = queuedRunnerView(aj);
+    pseudo.status = view.status;
+    pseudo.currentActivity = view.currentActivity;
   } else if (aj.status === "claimed" || aj.status === "running") {
     if (!pseudo.currentActivity) pseudo.currentActivity = "Running on the laptop runner";
   } else {
@@ -3904,10 +3945,19 @@ app.get("/api/routines/run/:runId", (req, res) => {
   // A runner-routed run's live state is the agent-job row; refresh on the poll
   // (progress lines -> the same stage/activity/transcript folds a local spawn
   // streams, terminal row -> the full close bookkeeping).
-  syncRunnerRoutedRun(run);
+  const queuedAj = syncRunnerRoutedRun(run);
   // Underscore fields are internal (the proc handle, the progress-fold cursor);
   // everything else is the run-panel contract, unchanged.
-  res.json(Object.fromEntries(Object.entries(run).filter(([k]) => !k.startsWith("_"))));
+  const view = Object.fromEntries(Object.entries(run).filter(([k]) => !k.startsWith("_")));
+  // SIM-562: a still-queued job overrides the RESPONSE ONLY with its honest
+  // substate (waiting-for-runner / stalled) - run.status itself stays
+  // "running" internally (see syncRunnerRoutedRun's comment).
+  if (queuedAj && queuedAj.status === "queued") {
+    const qv = queuedRunnerView(queuedAj);
+    view.status = qv.status;
+    view.currentActivity = qv.currentActivity;
+  }
+  res.json(view);
 });
 
 // Shared stop semantics for anything backed by an agent-job row (SIM-543):
@@ -3970,6 +4020,32 @@ app.post("/api/routines/run/:runId/stop", (req, res) => {
     } catch {}
     run.status = "stopped";
   }
+  res.json({ ok: true });
+});
+
+// SIM-562 fix-shape point 3: the owner's one-click way out of `stalled` - never
+// silently RUNNING for an hour with no recourse. Same "queued only" boundary
+// as Stop's cancelAgentJob (claimed/running is honestly progressing, nothing
+// to re-queue; terminal is already resolved) - store.requeueAgentJob resets
+// the SAME row's "queued since" clock rather than minting a fresh id, so the
+// runId this endpoint answers for keeps working across the whole flow (the
+// RunPanel poll, a source's run-history record) with nothing to repoint.
+app.post("/api/routines/run/:runId/requeue", (req, res) => {
+  const run = runs.get(req.params.runId);
+  if (!run && !/^aj-/.test(req.params.runId)) return res.status(404).json({ error: "run not found" });
+  const ajId = run ? run.agentJobId : req.params.runId;
+  if (!ajId) return res.status(409).json({ error: "this run has no runner job to re-queue" });
+  let r;
+  try {
+    r = store.requeueAgentJob(ajId);
+  } catch {
+    return res.status(500).json({ error: "requeue failed" });
+  }
+  if (!r.ok) {
+    if (r.notFound) return res.status(404).json({ error: "run not found" });
+    return res.status(409).json({ error: "this run is no longer queued (claimed or already finished); nothing to re-queue" });
+  }
+  if (run) run.currentActivity = runnerLivenessNote();
   res.json({ ok: true });
 });
 

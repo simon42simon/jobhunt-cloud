@@ -744,7 +744,20 @@ export interface ActivityRecord {
   [k: string]: unknown;
 }
 
-export type RunStatus = "running" | "done" | "failed" | "stopped";
+// waiting-for-runner / stalled (SIM-562): honest substates of a queued
+// runner-routed run - no runner seen recently, and unclaimed past the stalled
+// threshold, respectively. Neither is terminal (see isRunPending below); both
+// exist so the UI can stop pretending a run is actively RUNNING (an animated
+// bar, ticked steps) when nothing has claimed it yet.
+export type RunStatus = "running" | "waiting-for-runner" | "stalled" | "done" | "failed" | "stopped";
+
+// The one place "is this run still pending" is decided - useRunPolling (keep
+// polling), RunPanel/RunDock (elapsed timer, dismiss-X gating) all key off
+// this so they can never quietly disagree about which statuses are terminal.
+const RUN_TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set(["done", "failed", "stopped"]);
+export function isRunPending(status: RunStatus): boolean {
+  return !RUN_TERMINAL_STATUSES.has(status);
+}
 
 // Finish stats off the CLI's terminal `result` event (t-1783650926662).
 // Each field is null when the CLI did not report it.
