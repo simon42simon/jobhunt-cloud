@@ -24,11 +24,15 @@ const COL_COUNT = 9;
 
 // Grouped-mode section order. Deliberately NOT STATUS_ORDER: active work first
 // (lead -> offer), then submitted ("waiting on them"), then the terminal
-// states sink to the bottom.
+// states sink to the bottom. Must still COVER every live status - grouped mode
+// renders only these sections, so a status missing here silently drops its
+// jobs from the Table (SIM-599 / t-1784782704635: `ready` was omitted).
+// Pinned complete against STATUS_ORDER by tests/jobtable-group-order.test.ts.
 const GROUP_ORDER: Status[] = [
   "lead",
   "queued",
   "drafted",
+  "ready",
   "interview",
   "offer",
   "submitted",
