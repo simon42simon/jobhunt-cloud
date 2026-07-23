@@ -37,7 +37,9 @@ For **each** environment of the `app` service (owner, in the Railway dashboard):
 3. Registry credentials (the GHCR package is private): username `simon42simon`, password = a GitHub PAT with `read:packages`. If that PAT is ever rotated/expired, update it here too — pulls fail otherwise.
 4. Railway auto-deploys on connect; confirm the new deployment's metadata shows the image + digest.
 
-Status: **done for both environments** (staging 2026-07-21 build-out; production connected 2026-07-21 ~20:35Z, verified 2026-07-22).
+Status: **done for both jobhunt-private environments** (staging 2026-07-21 build-out; production connected 2026-07-21 ~20:35Z). **Re-verified live 2026-07-23 (SIM-442):** production's `serviceInstance.source.image` is `ghcr.io/simon42simon/jobhunt-cloud:production-current`, its last deployment's `imageDigest` matches staging's exactly, and the `deploy.yml` promote job has run **5 times successfully** since (v0.39.0 → v0.41.1) — the promote genuinely lands on production, not just on the first rehearsal. SIM-442's original finding (prod services set up by manual `railway up`, never wired to the channel alias) was already fixed for jobhunt-private before this session; the ticket had just never been closed against that fact. See `docs/runbooks/production-image-wiring.md` for the full verification + rollback runbook.
+
+**The public demo (`jobhunt-demo`, project `d8f5`) is a separate story — still NOT wired**, and blocked on something SIM-442 didn't anticipate: see the runbook for the owner decision this needs.
 
 Since SIM-487 the workflow **verifies every deploy** (`.github/scripts/verify-railway-deploy.sh`): after each `railway redeploy` it asserts via the Railway API that a *new* deployment reached SUCCESS whose `image`/`imageDigest` equal the GHCR digest of the tag being shipped, then probes the live `/healthz`. A disconnected source, wrong pin, stale pull, or dead deploy now **fails the workflow run** instead of reporting a phantom success.
 
