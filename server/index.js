@@ -526,7 +526,21 @@ const EXPORT_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
 const exportAuthFailures = new Map(); // ip -> { count, resetAt }
 mountExportRoutes();
 if (auth.enabled) {
-  app.use(createAuthGate(auth)); // 401 on any other /api/* without a valid session cookie
+  const cookieGate = createAuthGate(auth); // 401 on any other /api/* without a valid session cookie
+  // SIM-597: the facts routes are DUAL-AUTH. The agent lane (laptop runner /
+  // locally spawned generation skill) presents the runner bearer - the same
+  // least-privilege credential class the track-pack routes use - so a Bearer
+  // header on /api/facts* routes the request through runnerAuth (constant-time
+  // verify + the MF-5 failure counter, 401 on a bad token, 501 when the runner
+  // lane is not configured). No Bearer header -> the owner cookie gate,
+  // unchanged. The surface never gets weaker than cookie-only: the bearer path
+  // ADDS a verified credential, it never bypasses one.
+  app.use((req, res, next) => {
+    if (req.path.startsWith("/api/facts") && (req.get("authorization") || "").startsWith("Bearer ")) {
+      return runnerAuth(req, res, next);
+    }
+    return cookieGate(req, res, next);
+  });
 }
 
 app.get("/api/config", (req, res) => {
@@ -572,11 +586,13 @@ app.get("/api/config", (req, res) => {
 // (defense-in-depth, mirrors STORE_TRACK_PACKS) even though both backends
 // implement it today.
 //
-// NOTE for whoever wires the generation skill to this (SIM-597, cross-repo -
-// see the handoff brief): a skill running via the laptop runner or a local
-// spawn does NOT currently carry a session cookie OR a runner bearer token
-// applicable to these specific routes - that auth question is open and is
-// this handoff's first decision, not solved here.
+// AUTH (SIM-597 ruling, integrator-20 2026-07-23): these routes are DUAL-AUTH
+// when app-auth is on - the owner lane keeps the session cookie; the agent
+// lane (laptop runner / locally spawned skill) presents the RUNNER bearer,
+// which the gate above routes through runnerAuth (same credential class as
+// /api/track-packs). The runner spawns skills with env: process.env, so a
+// dispatched skill inherits RUNNER_TOKEN + RUNNER_CLOUD_URL; a local spawn
+// falls back to ~/.ssc-secrets/secrets.env (JOBHUNT_RUNNER_TOKEN).
 app.get("/api/facts", (req, res) => {
   if (!STORE_FACTS) return res.status(501).json({ error: "facts store is not available on this backend", code: "FACTS_STORE_UNAVAILABLE" });
   res.json({ ok: true, facts: store.getAllFacts() });
