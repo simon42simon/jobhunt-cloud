@@ -189,9 +189,11 @@ worked around.
 - Draft-stage **per-section regenerated-identically evidence** is not yet measured: the two
   baseline runs predate section instrumentation. Next batch must diff artifacts across jobs of
   the SAME track to measure the identical-block share (the number that proves the track-pack
-  saving; target ≥30% cheaper at owner-confirmed equal quality — SIM-420 acceptance). Blocked
-  on SIM-597 (the skill actually calling the SIM-544 cache) — the machinery alone produces no
-  reuse data to measure.
+  saving; target ≥30% cheaper at owner-confirmed equal quality — SIM-420 acceptance).
+  ~~Blocked on SIM-597~~ **UNBLOCKED 2026-07-23**: SIM-597 landed — the skills (now in this
+  repo's `skills/`) read facts from the facts API (dual-auth: owner cookie OR runner bearer)
+  and run the track-pack GET-before-build / PUT-after-build protocol. First real reuse numbers
+  arrive with the next same-track draft pair (verify via `agent_jobs.result.economics.reuseHitRate`).
 - ~~Draft/final **token counts** are not captured on the runner path~~ **CLOSED by SIM-574** —
   see "Implementation status" above.
 - The measured A/B (codified vs full run, SIM-575/JP-3) stays gated on the owner's 2026-07-21
