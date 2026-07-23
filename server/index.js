@@ -133,7 +133,15 @@ const ROOT = path.resolve(__dirname, "..");
 function loadConfig() {
   const localPath = path.join(ROOT, "config.local.json");
   const basePath = path.join(ROOT, "config.json");
-  const file = fs.existsSync(localPath) ? localPath : basePath;
+  // SIM-605: a test run must NEVER read the operator's config.local.json - a
+  // gitignored, laptop-only file (SIM-541 runner provisioning) that can point
+  // dataDir at the real vault, whose real auth.json would silently enable
+  // auth inside a test that forgot to set JOBHUNT_DATA_DIR/JOBHUNT_DOCS_DIR
+  // (the ~70-failure `npm test` repro this ticket found - proven environmental:
+  // the same files passed once DATA_DIR was isolated). Under JOBHUNT_TEST=1,
+  // config.local.json is never even considered, regardless of whether it
+  // exists on disk - the committed config.json placeholder is used instead.
+  const file = process.env.JOBHUNT_TEST !== "1" && fs.existsSync(localPath) ? localPath : basePath;
   const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
   if (!cfg.jobsDir) throw new Error("config.json must define jobsDir");
   return cfg;
@@ -7743,4 +7751,8 @@ if (process.env.JOBHUNT_TEST !== "1") {
 // `store` rides along for the pg-backed integration suites (demo-mode.test.js),
 // which must close the store's worker connection BEFORE stopping their embedded
 // cluster or the dying socket surfaces as an unhandled error in teardown.
-export { app, ROUTINES, store };
+// `loadConfig` is exported so tests/config-local-isolation.test.js (SIM-605) can
+// re-invoke the SAME decision function with a mocked fs, without ever touching
+// the real repo-root config.local.json (a real write there would race every
+// other test file importing this module in parallel).
+export { app, ROUTINES, store, loadConfig };
