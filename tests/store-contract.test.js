@@ -447,6 +447,26 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
       const { id } = store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
       expect(store.openJobFile(id, "nope.pdf")).toEqual({ ok: false, status: 404, error: "file not found" });
     });
+
+    // SIM-598 (JP-6) - readJobArtifactBytes is openJobFile's byte-returning twin
+    // (the quality gate page-counts content; it never streams to a response).
+    it("readJobArtifactBytes round-trips a generated job artifact byte-identically", () => {
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      const bytes = Buffer.from("%PDF-1.4 fake cv bytes \x00\x01", "binary");
+      store.saveJobArtifact(id, "CV.pdf", "application/pdf", bytes);
+      const r = store.readJobArtifactBytes(id, "CV.pdf");
+      expect(r.ok).toBe(true);
+      expect(r.name).toBe("CV.pdf");
+      expect(r.ext).toBe("pdf");
+      expect(Buffer.isBuffer(r.bytes)).toBe(true);
+      expect(r.bytes.equals(bytes)).toBe(true);
+    });
+
+    it("readJobArtifactBytes reports a missing folder / file with the contract statuses", () => {
+      expect(store.readJobArtifactBytes("Nope - Nowhere", "x.pdf")).toEqual({ ok: false, status: 404, error: "job folder not found" });
+      const { id } = store.createJob({ role: "Analyst", employer: "OCI", sector: "private" });
+      expect(store.readJobArtifactBytes(id, "nope.pdf")).toEqual({ ok: false, status: 404, error: "file not found" });
+    });
   });
 
   // ---- vault->cloud sync ingest: INSERT-ONLY on BOTH backends (SIM-393 I1) ----

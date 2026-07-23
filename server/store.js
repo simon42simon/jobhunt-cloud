@@ -447,6 +447,28 @@ export class FileStore {
     return { ok: true, stream: fs.createReadStream(target), ext: entry.ext, name: base };
   }
 
+  // SIM-598 (JP-6) - the same guarded reader as openJobFile, but returns the
+  // raw bytes directly instead of a stream: the quality gate needs to
+  // page-count an artifact's actual content, never to pipe it to an HTTP
+  // response. Same existence-allowlist + path-containment guard.
+  readJobArtifactBytes(id, name) {
+    const folderPath = this.jobFolderPath(id);
+    if (!folderPath) return { ok: false, status: 404, error: "job folder not found" };
+    const base = path.basename(name);
+    const entry = this._listFolderFiles(folderPath).find((f) => f.name === base);
+    if (!entry) return { ok: false, status: 404, error: "file not found" };
+    const target = path.join(folderPath, base);
+    const rel = path.relative(folderPath, path.resolve(target));
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel) || rel.includes(path.sep)) {
+      return { ok: false, status: 400, error: "invalid path" };
+    }
+    try {
+      return { ok: true, bytes: fs.readFileSync(target), ext: entry.ext, name: base };
+    } catch (e) {
+      return { ok: false, status: 500, error: e.message };
+    }
+  }
+
   // Resolve + contain a { id, rel } pair to a real file inside a job folder, for
   // the OS-open route. Returns the absolute target path, or null to reject.
   resolveOpenTarget(id, rel) {

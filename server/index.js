@@ -97,7 +97,19 @@ import {
   // this SAME result lane - the validator lives beside validateSourceRunResult
   // since it is the direct template for it.
   validateRunEconomics,
+  // SIM-598 (JP-6): the same artifact-name classifier validateArtifact uses,
+  // reused by the quality gate to decide which posted/on-disk files are
+  // page-capped ("cv"/"cover") vs untouched (gaps, prep, offer, ...).
+  artifactKindOf,
 } from "./runner-lib.js";
+// SIM-598 (JP-6) - the fail-closed generation-quality gate (deterministic
+// page-cap check, runs at draft time AND finalize; see the module header for
+// why an unmeasurable file is "not applicable" rather than a violation).
+import { checkPageCap } from "./quality-gate-lib.js";
+// The "current" (non-dated-copy) filter shared with FileStore/PgStore's own
+// readiness derivation, reused here so the gate checks the SAME file a fresh
+// hasCV/hasCoverLetter reads - never a stale dated backup.
+import { currentFiles } from "./store-helpers.js";
 // SIM-544 (JP-1): the track-pack reuse-machinery's pure cache-key/style-digest
 // helpers - see server/track-pack-lib.js header for the concept.
 import { validateTrackPackPayload } from "./track-pack-lib.js";
@@ -891,6 +903,16 @@ function mountRunnerRoutes() {
       const body = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       const v = validateArtifact(job.kind, { name, mime }, body.length);
       if (!v.ok) return res.status(400).json({ error: v.reason });
+      // SIM-598 (JP-6): the fail-closed quality gate, checked at the EARLIEST
+      // possible point for the hybrid-runner path - before the artifact ever
+      // reaches disk/bytea. Covers first-draft-job (DRAFT time, --no-pdf ->
+      // .docx, word-count estimate) and finalize-job (.pdf, page-object
+      // count) through the SAME check; see quality-gate-lib.js for why an
+      // unmeasurable body is waved through rather than blocked.
+      if (v.kind === "cv" || v.kind === "cover") {
+        const gate = checkPageCap({ kind: v.kind, name, mime, buffer: body });
+        if (gate.applicable && !gate.ok) return res.status(400).json({ error: gate.reason });
+      }
       try {
         // Target = job.jobId from the row (MF-4). saveJobArtifact contains the write
         // to that job's folder (FileStore) / job_files blob (PgStore).
@@ -3653,10 +3675,48 @@ function maybeAutoAdvanceJob(routine, exitCode, folder) {
     const job = store.getJobSummary(folder);
     const next = nextStatusAfterRun(routine, exitCode, job);
     if (!next || next === job.status) return;
+    // SIM-598 (JP-6): a violating artifact can never be reported done. Runs
+    // BEFORE the status write below, for BOTH advances this function makes
+    // (drafted after first-draft-job, ready after finalize-job) - the single
+    // choke point every run-close path (local spawn, runner-routed, demo
+    // replay) already funnels through, so this covers the exact owner-
+    // reported failure (an over-2-page CV at DRAFT time, --no-pdf) as well as
+    // finalize. Skipped in demo mode: its "fictional" CV/cover artifacts are
+    // %PDF-stub TEXT, not real rendered documents, and demo must always reach
+    // its scripted hero moment.
+    if (!DEMO_MODE) {
+      const gate = runQualityGate(folder, job);
+      if (!gate.ok) {
+        console.warn(`[jobhunt] quality gate blocked ${folder} -> "${next}": ${gate.reason}`);
+        try {
+          store.appendActivity({ kind: "quality-gate-block", jobId: folder, routine, attemptedStatus: next, reason: gate.reason });
+        } catch {
+          /* best-effort log; the block itself is what matters */
+        }
+        return; // fail-closed: leave the job exactly where it was
+      }
+    }
     store.updateJobFields(folder, { status: next });
   } catch {
     /* best-effort automation; never block run close */
   }
+}
+
+// SIM-598 (JP-6) - check every CURRENT cv/cover artifact this job now has
+// against the deterministic page cap (server/quality-gate-lib.js). Only "cv"
+// and "cover" kinds are gated (checkPageCap no-ops on anything else); a file
+// this module cannot read is skipped rather than blocked (best-effort - an
+// I/O hiccup must never masquerade as a quality violation).
+function runQualityGate(folder, job) {
+  for (const file of currentFiles(job.files || [])) {
+    const kind = artifactKindOf(file.name);
+    if (kind !== "cv" && kind !== "cover") continue;
+    const read = store.readJobArtifactBytes(folder, file.name);
+    if (!read.ok) continue;
+    const check = checkPageCap({ kind, name: file.name, mime: "", buffer: read.bytes });
+    if (check.applicable && !check.ok) return { ok: false, reason: check.reason };
+  }
+  return { ok: true };
 }
 
 // Demo replay pump (design 5.2). Fold each transcript line through the shared

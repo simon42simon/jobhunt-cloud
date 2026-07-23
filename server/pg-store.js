@@ -439,6 +439,19 @@ export class PgStore {
     return { ok: true, stream: Readable.from(Buffer.from(row.bytes)), ext: extOf(base), name: base };
   }
 
+  // SIM-598 (JP-6) - same guard as openJobFile, but returns the raw bytes
+  // directly (the quality gate page-counts the content; it never streams to
+  // an HTTP response).
+  readJobArtifactBytes(id, name) {
+    if (!this._one("select id from jobs where id=$1", [id])) {
+      return { ok: false, status: 404, error: "job folder not found" };
+    }
+    const base = path.basename(name);
+    const row = this._one("select bytes from job_files where job_id=$1 and name=$2", [id, base]);
+    if (!row) return { ok: false, status: 404, error: "file not found" };
+    return { ok: true, bytes: Buffer.from(row.bytes), ext: extOf(base), name: base };
+  }
+
   saveJobArtifact(id, name, mime, bytes) {
     if (!this._one("select id from jobs where id=$1", [id])) {
       throw httpError(404, "job folder not found");
