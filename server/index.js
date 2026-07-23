@@ -6395,6 +6395,13 @@ app.get("/api/discovery/sources", (req, res) => {
   } catch {
     /* best-effort; the registry still serves */
   }
+  // SIM-612: catch the zombies the above sweep cannot see (no agent-job to
+  // reconcile against - see reconcileStalledSourceRuns's comment).
+  try {
+    reconcileStalledSourceRuns();
+  } catch {
+    /* best-effort; the registry still serves */
+  }
   let data;
   try {
     data = store.loadSources();
@@ -6439,6 +6446,12 @@ app.get("/api/discovery/sources/:id", (req, res) => {
   // exactly what the UI watches while a runner-path run is pending.
   try {
     reconcileRunnerSourceRuns();
+  } catch {
+    /* best-effort; the read still serves */
+  }
+  // SIM-612: same age-based backstop as the registry GET.
+  try {
+    reconcileStalledSourceRuns();
   } catch {
     /* best-effort; the read still serves */
   }
@@ -6599,6 +6612,12 @@ function launchSourceRun(sourceId, batchId, cb) {
   // runner-routed record is running; mirrors the job-scope launch sweep.
   try {
     reconcileRunnerSourceRuns();
+  } catch {}
+  // SIM-612: same age-based backstop as the registry GET, before this launch's
+  // own running-guard read (so a zombie predating the runner repoint can never
+  // 409 a fresh launch either).
+  try {
+    reconcileStalledSourceRuns();
   } catch {}
   readDiscovery((err, disc) => {
     const finds = !err && disc && Array.isArray(disc.discoveries) ? disc.discoveries : [];
@@ -7246,6 +7265,45 @@ function reconcileRunnerSourceRuns() {
     }
   }
   return true;
+}
+
+// SIM-612: an AGE-based backstop, independent of reconcileRunnerSourceRuns'
+// agent-job lookup above. That sweep only ever looks at records whose runId
+// starts with "aj-" (the SIM-535 runner-routed shape); a record dispatched
+// before the runner repoint (a local-spawn optimistic "running" write with a
+// plain run id, no agent-job row to ever reconcile against) or one whose
+// agent-job row was itself purged sits at outcome:"running" forever - the
+// exact 4-zombie-sources repro (all dated 2026-07-14, predating SIM-535). A
+// discovery scrape (WebFetch across a handful of postings) never legitimately
+// runs this long, so past SOURCE_RUN_STALLED_MS "still running" stops being
+// honest regardless of runId shape or whether a matching agent job exists.
+// Swept on the same triggers as reconcileRunnerSourceRuns (the registry GET
+// and before a fresh launch) so a zombie unblocks itself the next time
+// anyone looks - no owner action, and no separate code path for the one-off
+// cleanup of the already-stuck rows.
+const SOURCE_RUN_STALLED_MS = Number(process.env.SOURCE_RUN_STALLED_MS) || 30 * 60 * 1000; // 30 min
+function reconcileStalledSourceRuns(now = Date.now()) {
+  let data;
+  try {
+    data = store.loadSources();
+  } catch {
+    return false;
+  }
+  let dirty = false;
+  for (const source of data.sources || []) {
+    for (const rec of source.runs || []) {
+      if (!rec || rec.outcome !== "running") continue;
+      const startedMs = Date.parse(rec.startedAt || "");
+      // No parseable startedAt is itself a data problem, not a live run - stalled too.
+      if (Number.isFinite(startedMs) && now - startedMs < SOURCE_RUN_STALLED_MS) continue;
+      const ageMin = Number.isFinite(startedMs) ? Math.round((now - startedMs) / 60000) : null;
+      rec.outcome = "incomplete";
+      rec.errorReason = ageMin != null ? `stalled - unresolved for ${ageMin}m; never reported back` : "stalled - no startedAt recorded";
+      dirty = true;
+    }
+  }
+  if (dirty) store.saveSources(data);
+  return dirty;
 }
 
 // ---- job-folder file reader (remote-honest Files buttons, t-1783201094679) --
