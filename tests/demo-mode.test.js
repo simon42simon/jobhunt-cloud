@@ -232,6 +232,50 @@ suite("demo mode, end to end (embedded PG)", () => {
     expect(over.body.error).toContain(`maximum of ${UPLOAD_DEMO_MAX_COUNT} files`);
   });
 
+  it("SIM-599 / t-1784782719366: demo triage decides against the seeded finds - the decision sticks on the next read", async () => {
+    // The demo's finds are generator-served (readDiscovery's DEMO_MODE branch),
+    // never rows in discovery_finds - the decide route used to fall through to
+    // the store lookup and 404 on EVERY Skip/Maybe (AC-J5-3/5).
+    const before = await request(app).get("/api/discovery");
+    expect(before.status).toBe(200);
+    const target = before.body.discoveries.find((f) => !f.Decision);
+    expect(target).toBeTruthy();
+
+    const res = await request(app)
+      .post("/api/discovery/decide")
+      .send({ title: target.Title, link: target.Link, decision: "skip" });
+    writesSpent++;
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.decision).toBe("skip");
+
+    // The decision survives the next read (the overlay applies to the
+    // regenerated finds), and no OTHER row was touched.
+    const after = await request(app).get("/api/discovery");
+    const row = after.body.discoveries.find((f) => f.Title === target.Title && f.Link === target.Link);
+    expect(row.Decision).toBe("skip");
+    expect(after.body.discoveries.filter((f) => f.Decision === "skip").length).toBe(
+      before.body.discoveries.filter((f) => f.Decision === "skip").length + 1,
+    );
+
+    // "clear" blanks it back to undecided through the same path.
+    const cleared = await request(app)
+      .post("/api/discovery/decide")
+      .send({ title: target.Title, link: target.Link, decision: "clear" });
+    writesSpent++;
+    expect(cleared.status).toBe(200);
+    const reread = await request(app).get("/api/discovery");
+    expect(reread.body.discoveries.find((f) => f.Title === target.Title && f.Link === target.Link).Decision).toBe("");
+
+    // A genuinely unknown row still 404s - the demo branch is tolerant, not fake.
+    const missing = await request(app)
+      .post("/api/discovery/decide")
+      .send({ title: "No Such Demo Find", link: "https://demo.example.test/none", decision: "maybe" });
+    writesSpent++;
+    expect(missing.status).toBe(404);
+    expect(missing.body.error).toMatch(/no matching/i);
+  });
+
   it("SIM-388: writes 429 past the per-IP threshold with the pinned body; reads stay open", async () => {
     // Spend the remaining write budget.
     for (let i = writesSpent; i < WRITE_MAX; i++) {
