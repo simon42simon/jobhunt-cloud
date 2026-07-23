@@ -101,14 +101,14 @@ afterAll(() => {
 });
 
 describe("aj-* run-status bridge + liveness", () => {
-  it("bridges a queued source run the runs Map never held, with the no-runner-connected note", async () => {
+  it("bridges a queued source run the runs Map never held, honestly as waiting-for-runner (SIM-562) with the no-runner-connected note", async () => {
     const { runId } = await startRun("src-a");
     expect(runId).toMatch(/^aj-/);
     const r = await getBridgedRun(runId);
     expect(r.status).toBe(200);
-    expect(r.body.status).toBe("running");
-    // No runner has EVER polled this server: the wait note must say so instead
-    // of impersonating progress.
+    // No runner has EVER polled this server: a distinct status, not a reworded
+    // "running" - the fix-shape's first fixture (SIM-562).
+    expect(r.body.status).toBe("waiting-for-runner");
     expect(r.body.currentActivity).toMatch(/no laptop runner connected/i);
   });
 
@@ -132,16 +132,18 @@ describe("aj-* run-status bridge + liveness", () => {
     expect(stop2.body.canceled).toBe(false);
   });
 
-  it("after a runner poll, a queued run shows the plain waiting note", async () => {
+  it("after a runner poll, a queued run transitions to the plain running/waiting note (SIM-562 fixture: runner connects -> running)", async () => {
     // src-a has a queued run from the test above; the claim below stamps
     // lastRunnerPollAt (and claims that very job).
     const claim = await claimNext();
     expect(claim.kind).toBe("discover-jobs-source");
     claimedNonce = claim.nonce;
-    // Enqueue src-b AFTER the poll: queued + recently-seen runner = plain wait.
+    // Enqueue src-b AFTER the poll: queued + recently-seen runner = plain wait,
+    // reported as the ordinary "running" status (not waiting-for-runner).
     const { runId } = await startRun("src-b");
     const r = await getBridgedRun(runId);
     expect(r.status).toBe(200);
+    expect(r.body.status).toBe("running");
     expect(r.body.currentActivity).toMatch(/waiting for the laptop runner/i);
   });
 

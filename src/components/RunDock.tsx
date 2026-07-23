@@ -3,7 +3,7 @@ import { useRunPolling } from "../hooks/useRunPolling";
 import { runTitle, type TrackedRun } from "../lib/runDock";
 import { hexA, runStatusMeta } from "../lib/statusColors";
 import { mmss } from "../lib/time";
-import type { RunStatus } from "../types";
+import { isRunPending, type RunStatus } from "../types";
 import { Badge } from "ssc-ui";
 
 // The bottom run dock (t-1783119823228): one chip per MINIMIZED run, in the
@@ -33,6 +33,10 @@ function DockChip({
   const record = useRunPolling(run.runId, onFinished);
   const status: RunStatus = record?.status || "running";
   const running = status === "running";
+  // SIM-562: waiting-for-runner / stalled are pending too - the dismiss-X
+  // (finished-only affordance) and the elapsed timer key off this, not the
+  // stricter `running` (which alone drives the spinner-vs-dot glyph below).
+  const pending = isRunPending(status);
   const tone = runStatusMeta(status);
   const title = runTitle(record?.routine, run.label);
   // The scope target ("Role - Employer" folder, ticket id, source id) rides on
@@ -43,10 +47,10 @@ function DockChip({
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     setNow(Date.now());
-    if (status !== "running") return;
+    if (!pending) return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [status]);
+  }, [pending]);
   const startMs = record?.startedAt ? new Date(record.startedAt).getTime() : null;
 
   return (
@@ -85,7 +89,7 @@ function DockChip({
           </span>
         )}
       </button>
-      {!running && (
+      {!pending && (
         <button
           type="button"
           onClick={onDismiss}

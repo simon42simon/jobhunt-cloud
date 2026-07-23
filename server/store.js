@@ -1181,6 +1181,28 @@ export class FileStore {
     return { ok: true, status: "failed" };
   }
 
+  // Owner-initiated re-queue of a run stuck `stalled` (SIM-562: unclaimed past
+  // the threshold with a one-click way out, never a silent hour-long "RUNNING").
+  // Deliberately resets the SAME row's "queued since" clock rather than
+  // canceling + minting a fresh id - every consumer keyed on this runId (the
+  // RunPanel poll, a source's run-history record) keeps working unchanged.
+  // Same "queued only" boundary as cancelAgentJob: claimed/running is honestly
+  // progressing, terminal has nothing left to retry.
+  requeueAgentJob(id) {
+    const data = this._loadAgentJobs();
+    const rec = data.jobs.find((j) => j.id === id);
+    if (!rec) return { ok: false, notFound: true };
+    if (rec.status === "done" || rec.status === "failed" || rec.status === "dead") {
+      return { ok: false, terminal: true, status: rec.status };
+    }
+    if (rec.status !== "queued") return { ok: false, claimed: true, status: rec.status };
+    const now = new Date().toISOString();
+    rec.createdAt = now;
+    rec.updatedAt = now;
+    this._saveAgentJobs(data);
+    return { ok: true };
+  }
+
   // Honest laptop-off pending state (design 4.6): counts by status + the newest
   // heartbeat, so the UI can distinguish "runner polling" from "laptop offline".
   runnerQueueState() {
