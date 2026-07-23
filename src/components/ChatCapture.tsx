@@ -255,6 +255,7 @@ export function ChatCapture({
   onRunStarted,
   onViewTasks,
   onOpenEntity,
+  agentAssessmentAvailable = true,
 }: {
   // Reuses the SAME run-tracking the rest of the app uses (App.tsx's
   // setActiveRun -> the one shared <RunPanel>), rather than spinning up a
@@ -266,6 +267,15 @@ export function ChatCapture({
   // Entity deep link (t-1783255872307): App's openEntity (SSC hub handoff).
   // Report rows and "Related" chips use it to land ON the ticket / project.
   onOpenEntity: (entity: EntityRef) => void;
+  // SIM-577: App.tsx's config.agentSpawnAvailable (CLAUDE_BIN_PRESENT server-
+  // side) - whether this instance can spawn the assess-ticket routine at all.
+  // "Queue it" auto-fires assess-ticket regardless (the ticket still files;
+  // that path never touches spawn), but renderReportRow below uses this to
+  // resolve the "Awaiting CTO assessment..." spinner honestly instead of
+  // spinning forever when no CTO comment can ever arrive. Defaults to
+  // available (optimistic) so a not-yet-loaded config never flashes the
+  // unavailable copy.
+  agentAssessmentAvailable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   // Where the FAB sits (top-left px). null = never dragged, so the CSS default
@@ -1031,13 +1041,23 @@ export function ChatCapture({
               />
             </div>
           </>
-        ) : (
+        ) : agentAssessmentAvailable ? (
           <div className="mt-2 flex items-center gap-1.5 text-[11.5px] italic text-[var(--color-muted)]">
             <span
               aria-hidden="true"
               className="h-3 w-3 animate-spin rounded-full border-2 border-[var(--color-edge)] border-t-[var(--color-accent)]"
             />
             Awaiting CTO assessment...
+          </div>
+        ) : (
+          // SIM-577: no CTO comment, and this instance cannot spawn assess-ticket
+          // at all (agentAssessmentAvailable derived from GET /api/config's
+          // agentSpawnAvailable, the same CLAUDE_BIN_PRESENT fact server-side) -
+          // an honest terminal state instead of a spinner that would never
+          // resolve. Ticket-scoped routines have no runner leg (deliberately
+          // excluded from runner routing), so this can never self-correct.
+          <div className="mt-2 rounded-md border border-[var(--color-edge)] bg-[var(--color-panel-2)] px-2.5 py-1.5 text-[11.5px] leading-relaxed text-[var(--color-muted)]">
+            Assessment runs on the laptop runner - unavailable on this instance.
           </div>
         )}
       </li>

@@ -537,6 +537,13 @@ app.get("/api/config", (req, res) => {
     // SAME storeBackend signal `sse` above uses; env-overridable so the owner
     // can point it elsewhere without a code change.
     sscHubUrl: runtime.storeBackend === "pg" ? null : process.env.SSC_HUB_URL || "http://localhost:5185",
+    // SIM-577: the SAME dispatch-capability fact agentRunDispatch() is built
+    // from (CLAUDE_BIN_PRESENT, declared below - never re-derive it), surfaced
+    // so JobChat and ChatCapture can degrade honestly client-side too. Neither
+    // surface has a runner leg (chat is synchronous; ticket-scoped routines are
+    // deliberately excluded from runner routing), so "no local claude binary"
+    // means "unavailable, full stop" on this instance.
+    agentSpawnAvailable: CLAUDE_BIN_PRESENT,
   });
 });
 
@@ -2923,6 +2930,12 @@ function scopeIdExists(scope, id) {
 }
 
 function resolveClaude() {
+  // JOBHUNT_CLAUDE_BIN is the test seam (mirrors JOBHUNT_PYTHON): points the
+  // dispatch-capability fact CLAUDE_BIN_PRESENT below at a controlled path so
+  // the SIM-577 honest-degradation tests can force "no local claude on this
+  // instance" hermetically, without touching the owner's real config.claudeBin
+  // or laptop install.
+  if (process.env.JOBHUNT_CLAUDE_BIN) return process.env.JOBHUNT_CLAUDE_BIN;
   if (config.claudeBin && fs.existsSync(config.claudeBin)) return config.claudeBin;
   const guess = path.join(process.env.USERPROFILE || "", ".local", "bin", "claude.exe");
   if (fs.existsSync(guess)) return guess;
@@ -3631,9 +3644,26 @@ function startRun(routine, jobId, batchId = null, extra = {}) {
   // the laptop runner queue instead of a doomed ENOENT spawn. Sitting INSIDE
   // startRun puts every launch path (single run, batch drain) behind the one
   // decision; scope + kind are both checked so ticket-scoped routines and any
-  // future non-runner routine keep the local path (and its loud failure).
+  // future non-runner routine keep the local path.
   if (def.scope === "job" && isRunnerKind(routine) && agentRunDispatch() === "runner") {
     return startRunnerRoutedRun(run, routine);
+  }
+  // SIM-577: ticket-scoped routines (assess-ticket, work-ticket) are
+  // deliberately excluded from runner routing above (b - widening runner
+  // routing to ticket scope - is a separate, out-of-scope decision) and only
+  // ever spawn locally. Consult the SAME CLAUDE_BIN_PRESENT fact the runner-
+  // routing branch is built from BEFORE attempting that spawn: on an instance
+  // with no local binary (every pg/Railway image), the spawn below used to die
+  // "[spawn error] spawn claude ENOENT" - a leaked implementation detail in
+  // ChatCapture's degrade toast, and it gave the ticket's "Awaiting CTO
+  // assessment..." spinner nothing to ever resolve on (see the client-side
+  // agentSpawnAvailable fix, GET /api/config). Fail the run immediately with a
+  // plain-language reason instead of the doomed spawn attempt.
+  if (def.scope === "ticket" && !CLAUDE_BIN_PRESENT) {
+    run.status = "failed";
+    run.output = "Agent execution runs on the laptop runner - unavailable on this instance.";
+    store.appendActivity({ kind: "run", runId, status: "failed", exitCode: null });
+    return run;
   }
   // Base argv shared by EVERY routine: `--allowedTools` (ALLOWED_TOOLS) is the
   // config-editable pre-approval tool list and `--permission-mode acceptEdits`
@@ -4335,6 +4365,23 @@ app.post("/api/jobs/:id/chat", async (req, res) => {
     return res.json({
       disabled: true,
       reason: "The live assistant is turned off in the hosted demo.",
+      messages: history,
+    });
+  }
+  // SIM-577: consult the SAME dispatch-capability fact agentRunDispatch() is
+  // built from (CLAUDE_BIN_PRESENT) - never a second existsSync check. Chat has
+  // no runner leg (it is synchronous, 180s timeout; RUNNER_ARTIFACT_KINDS
+  // carries no chat kind), so "no local claude binary" means unavailable, full
+  // stop - every pg/Railway image ships without one, and the spawn below used
+  // to die ENOENT and leak a raw 500. Same degrade shape as the DEMO_MODE gate
+  // above (disabled/reason/messages, transcript UNCHANGED) so JobChat's
+  // existing disabled-response handling covers both without a new branch.
+  if (!CLAUDE_BIN_PRESENT) {
+    const chats = store.loadChats();
+    const history = Array.isArray(chats[folder]) ? chats[folder] : [];
+    return res.json({
+      disabled: true,
+      reason: "Agent chat runs on the laptop runner - unavailable on this instance.",
       messages: history,
     });
   }

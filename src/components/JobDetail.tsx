@@ -1186,8 +1186,21 @@ export function JobDetailDrawer({
                 assistant; a suggested action routes through runSuggested (the same
                 guard as the action buttons). SIM-425: gated off on demo/hosted
                 (mirrors App's own config?.appMode === "demo" check) since the
-                assistant shells out to a CLI the deployed image doesn't have. */}
-            <JobChat jobId={job.id} onRunSuggested={runSuggested} demoMode={config?.appMode === "demo"} />
+                assistant shells out to a CLI the deployed image doesn't have.
+                SIM-577: separately gated off on a real (non-demo) instance with
+                no local claude to spawn (config.agentSpawnAvailable === false -
+                every pg/Railway image) - an honest, distinct reason from the
+                demo one. Absent field (older server) defaults to available. */}
+            <JobChat
+              jobId={job.id}
+              onRunSuggested={runSuggested}
+              demoMode={config?.appMode === "demo"}
+              unavailableReason={
+                config && config.agentSpawnAvailable === false
+                  ? "Agent chat runs on the laptop runner - unavailable on this instance."
+                  : null
+              }
+            />
           </>
         )}
       </aside>
