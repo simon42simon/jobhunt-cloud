@@ -805,10 +805,25 @@ export function agentEventToUpdate(evt, stages, stageIndex, hasTranscript = true
     return out;
   }
   if (evt.type === "result") {
+    // SIM-574 (JP-2): capture token usage when the CLI emits it (real
+    // invocations - today's hand-authored demo transcripts do not, by
+    // construction). Honest capture: an absent usage block yields tokens:
+    // null, never a fabricated number (docs/agent-pipeline.md cross-stage
+    // rule 3 / the "unreported, never fake" posture already used elsewhere).
+    const u = evt.usage && typeof evt.usage === "object" ? evt.usage : null;
+    const tokens = u
+      ? {
+          input: Number.isFinite(u.input_tokens) ? u.input_tokens : null,
+          output: Number.isFinite(u.output_tokens) ? u.output_tokens : null,
+          cacheRead: Number.isFinite(u.cache_read_input_tokens) ? u.cache_read_input_tokens : null,
+          cacheCreate: Number.isFinite(u.cache_creation_input_tokens) ? u.cache_creation_input_tokens : null,
+        }
+      : null;
     out.stats = {
       durationMs: Number.isFinite(evt.duration_ms) ? evt.duration_ms : null,
       numTurns: Number.isFinite(evt.num_turns) ? evt.num_turns : null,
       costUsd: Number.isFinite(evt.total_cost_usd) ? evt.total_cost_usd : null,
+      tokens,
     };
     out.activity = null;
     // A successful result's text already streamed as the last assistant turn,
@@ -866,4 +881,108 @@ export function runDurationHistory(raw, cap = 8) {
     }
   }
   return byRoutine;
+}
+
+// ---- SIM-596 (JP-4) nightly auto-draft scheduler: pure helpers -------------
+// "The trigger is 100% deterministic code (SQL query + queue insert) - no LLM
+// decides when or what to run" (the ticket). Everything here is pure so the
+// selection/timing math is unit-tested directly, without booting the server.
+
+const AUTO_DRAFT_TZ = "America/Toronto"; // ET; Node's built-in ICU handles EST/EDT
+const AUTO_DRAFT_ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+// Today's calendar date (YYYY-MM-DD) AS OBSERVED IN America/Toronto, regardless
+// of the server process's own timezone (Railway runs UTC). en-CA formats
+// YYYY-MM-DD directly.
+//
+// Deliberately NOT the Temporal API: it is available on this developer's local
+// Node (v26), but the app's Dockerfile pins `node:20-bookworm-slim` for the
+// actual deployment, where `Temporal` does not exist - using it here would
+// pass every local/dev test and throw ReferenceError in production. Intl has
+// been full-ICU by default since Node 13 and needs no such caveat.
+export function todayET(now = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", { timeZone: AUTO_DRAFT_TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
+}
+
+// The America/Toronto UTC offset (minutes, negative = behind UTC) IN EFFECT AT
+// the given instant - EST is -300, EDT is -240. Derived by formatting `at` in
+// the zone with a numeric offset part and parsing it back (no tz-database
+// dependency beyond what Intl/ICU already ships).
+function etOffsetMinutes(at) {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone: AUTO_DRAFT_TZ, timeZoneName: "shortOffset" }).formatToParts(at);
+  const tzPart = (parts.find((p) => p.type === "timeZoneName") || {}).value || "GMT-5";
+  const m = /GMT([+-]\d+)(?::(\d+))?/.exec(tzPart);
+  if (!m) return -300; // fallback: EST
+  const sign = m[1].startsWith("-") ? -1 : 1;
+  const hours = Math.abs(Number(m[1]));
+  const mins = Number(m[2] || 0);
+  return sign * (hours * 60 + mins);
+}
+
+// ms until the next AUTO_DRAFT_HOUR_ET:00 America/Toronto wall-clock time,
+// strictly in the future (minimum 1s, never 0/negative). Meant to be called
+// fresh EVERY firing (re-arm, never a fixed setInterval) so a DST transition
+// self-corrects the next night instead of drifting by an hour indefinitely -
+// each call re-derives the offset from `now`, so the two nights a year DST
+// actually flips are the only ones where the fired instant may be off by up
+// to an hour, which is immaterial for a nightly batch job.
+export const AUTO_DRAFT_HOUR_ET = 2;
+export function msUntilNextAutoDraftFire(now = new Date()) {
+  const dateET = todayET(now);
+  const [y, mo, d] = dateET.split("-").map(Number);
+  const offsetMin = etOffsetMinutes(now);
+  let candidateUtcMs = Date.UTC(y, mo - 1, d, AUTO_DRAFT_HOUR_ET, 0, 0) - offsetMin * 60_000;
+  if (candidateUtcMs <= now.getTime()) {
+    // today's fire time already passed - try tomorrow, re-deriving the offset
+    // at that instant (handles a DST flip landing between now and then)
+    const offsetMin2 = etOffsetMinutes(new Date(candidateUtcMs + 24 * 60 * 60 * 1000));
+    candidateUtcMs = Date.UTC(y, mo - 1, d + 1, AUTO_DRAFT_HOUR_ET, 0, 0) - offsetMin2 * 60_000;
+  }
+  return Math.max(1000, candidateUtcMs - now.getTime());
+}
+
+// today (ET) + N calendar days, as a YYYY-MM-DD string. Pure calendar-day
+// arithmetic (UTC-anchored parse/format so it never touches the machine's own
+// timezone) - dateStr is already a plain calendar date with no time-of-day
+// component to get wrong.
+function addDaysISO(dateStr, days) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+// Select the jobs eligible for an unattended nightly first-draft-job enqueue
+// (SIM-596 v1 scope):
+//   - status "queued" AND hasCV false (never drafted - "already-drafted" is
+//     excluded by construction, not a separate dedupe pass)
+//   - deadline a LITERAL YYYY-MM-DD within [todayET, todayET + windowDays]
+//     (past-deadline is excluded too, but sweepExpiredJobs already closes
+//     those before this ever sees them; rolling/blank deadlines can never be
+//     judged, so they never qualify - stay on manual buttons/batch runs)
+//   - sector !== "private" (v1 scope: deadline-driven PUBLIC jobs only)
+// Deterministic ordering (earliest deadline first, so a capped night favors
+// the most urgent postings) with a hard cap - the excess is `overflow`
+// (a COUNT, never silently dropped; the caller logs it), not truncated away
+// unreported. `isPending(job)` (optional, store-touching - injected rather
+// than imported so this function stays pure/store-free) is applied BEFORE the
+// cap: an already-pending job (a prior fire already queued its draft) must
+// never occupy one of tonight's cap slots and starve a genuinely new job of
+// it - dedupe first, THEN cap, never the other order.
+export function selectAutoDraftCandidates(jobs, { todayET: today, windowDays = 3, cap = 10, isPending } = {}) {
+  if (!AUTO_DRAFT_ISO_DATE.test(String(today))) return { selected: [], overflow: 0, skippedPending: 0 };
+  const endET = addDaysISO(today, windowDays);
+  let skippedPending = 0;
+  const eligible = (Array.isArray(jobs) ? jobs : [])
+    .filter((j) => j && j.status === "queued" && !j.hasCV)
+    .filter((j) => typeof j.deadline === "string" && AUTO_DRAFT_ISO_DATE.test(j.deadline))
+    .filter((j) => j.deadline >= today && j.deadline <= endET)
+    .filter((j) => j.sector !== "private")
+    .filter((j) => {
+      if (typeof isPending !== "function" || !isPending(j)) return true;
+      skippedPending++;
+      return false;
+    })
+    .sort((a, b) => (a.deadline < b.deadline ? -1 : a.deadline > b.deadline ? 1 : 0));
+  const selected = eligible.slice(0, cap);
+  const overflow = Math.max(0, eligible.length - cap);
+  return { selected, overflow, skippedPending };
 }
