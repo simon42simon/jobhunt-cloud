@@ -197,6 +197,12 @@ export const api = {
   stopRun: (runId: string) =>
     fetch(`/api/routines/run/${runId}/stop`, { method: "POST" }).then((r) => json<{ ok: boolean }>(r)),
 
+  // SIM-562: the owner's one-click way out of a `stalled` run - same runId
+  // throughout (the server resets the existing agent-job's queued-since clock
+  // rather than minting a fresh id), so the caller just keeps polling.
+  requeueRun: (runId: string) =>
+    fetch(`/api/routines/run/${runId}/requeue`, { method: "POST" }).then((r) => json<{ ok: boolean }>(r)),
+
   batchRun: (routine: string, jobIds: string[]) =>
     fetch("/api/routines/batch", {
       method: "POST",

@@ -691,7 +691,11 @@ export default function App() {
           <main>. On a crash the surface just disappears (fallback null, still
           logged) - the rest of the app stays fully usable. */}
       <ErrorBoundary fallback={null}>
-        <ChatCapture onRunStarted={trackRun} onViewTasks={() => switchView("product")} onOpenEntity={openEntity} />
+        <ChatCapture onRunStarted={trackRun}
+          onViewTasks={() => switchView("product")}
+          onOpenEntity={openEntity}
+          agentAssessmentAvailable={config ? config.agentSpawnAvailable !== false : true}
+        />
       </ErrorBoundary>
 
       {/* The demo's guided tour (RC-4 / SIM-88): first-run choice + 3 spotlight

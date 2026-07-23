@@ -135,6 +135,13 @@ export interface AppConfig {
   // tab's handoff CTA) rather than rendering a dead localhost link. Absent (an
   // older server) is treated the same as null - no link.
   sscHubUrl?: string | null;
+  // SIM-577: can this instance spawn a local `claude` process at all (the same
+  // CLAUDE_BIN_PRESENT fact agentRunDispatch() is built from server-side)?
+  // false on every pg/Railway image. JobChat and ChatCapture's assess-ticket
+  // spinner both have no runner leg, so this is the one signal that tells them
+  // whether to degrade honestly instead of 500ing or spinning forever. Absent
+  // (an older server) is treated as available (optimistic default).
+  agentSpawnAvailable?: boolean;
 }
 
 export type PhaseStatus = "shipped" | "in_progress" | "planned" | "later";
@@ -744,7 +751,20 @@ export interface ActivityRecord {
   [k: string]: unknown;
 }
 
-export type RunStatus = "running" | "done" | "failed" | "stopped";
+// waiting-for-runner / stalled (SIM-562): honest substates of a queued
+// runner-routed run - no runner seen recently, and unclaimed past the stalled
+// threshold, respectively. Neither is terminal (see isRunPending below); both
+// exist so the UI can stop pretending a run is actively RUNNING (an animated
+// bar, ticked steps) when nothing has claimed it yet.
+export type RunStatus = "running" | "waiting-for-runner" | "stalled" | "done" | "failed" | "stopped";
+
+// The one place "is this run still pending" is decided - useRunPolling (keep
+// polling), RunPanel/RunDock (elapsed timer, dismiss-X gating) all key off
+// this so they can never quietly disagree about which statuses are terminal.
+const RUN_TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set(["done", "failed", "stopped"]);
+export function isRunPending(status: RunStatus): boolean {
+  return !RUN_TERMINAL_STATUSES.has(status);
+}
 
 // Finish stats off the CLI's terminal `result` event (t-1783650926662).
 // Each field is null when the CLI did not report it.
@@ -752,6 +772,10 @@ export interface RunStats {
   durationMs: number | null;
   numTurns: number | null;
   costUsd: number | null;
+  // SIM-574 (JP-2): token usage, when the CLI emits a `usage` block (real
+  // invocations - not the demo's hand-authored transcripts). null when absent,
+  // never fabricated. Not yet surfaced in RunPanel (backend-only so far).
+  tokens: { input: number | null; output: number | null; cacheRead: number | null; cacheCreate: number | null } | null;
 }
 
 export interface RoutineRun {

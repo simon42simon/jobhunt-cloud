@@ -55,6 +55,9 @@ import { mintNonce, constantTimeEqualHex, RUNNER_LEASE_MS, RUNNER_MAX_ATTEMPTS }
 // front validation), so the two backends can never drift on sync semantics.
 import { assertSafeName } from "./name-safety.js";
 import { sha256Hex, rowShaOf, validateJobFront } from "./sync-lib.js";
+// SIM-544 (JP-1) architecture correction, 2026-07-23 - shared with FileStore
+// so the two backends can never drift on what a facts kind is.
+import { FACTS_KINDS } from "./facts-lib.js";
 
 // WRITABLE_FIELDS -> jobs column. Keys are the ONLY frontmatter fields the surgical
 // patch may touch (mirrors updateFrontmatter's gate); column names are constants.
@@ -1151,7 +1154,21 @@ export class PgStore {
       nonce: row.nonce, claimedBy: row.claimed_by, attempts: row.attempts,
       progress: row.progress || [], result: row.result, error: row.error,
       leaseExpiresAt: row.lease_expires_at, lastHeartbeatAt: row.last_heartbeat_at,
+      // SIM-562: the stalled-threshold clock (server/index.js queuedRunnerView)
+      // reads createdAt off a still-queued row - FileStore's agentJobById always
+      // carried it (a plain object spread); this mirror was missing both.
+      createdAt: row.created_at, updatedAt: row.updated_at,
     };
+  }
+
+  // SIM-596 (JP-4): mirrors store.js's hasPendingAgentJob (the nightly auto-
+  // draft scheduler's "skip already-pending" dedupe guard) - see its comment.
+  hasPendingAgentJob(jobId, kind) {
+    const row = this._one(
+      "select 1 from agent_jobs where job_id=$1 and kind=$2 and status in ('queued','claimed','running') limit 1",
+      [jobId, kind],
+    );
+    return !!row;
   }
 
   completeAgentJob(id, { runnerId, nonce, status, error = null, result = null }) {
@@ -1181,6 +1198,52 @@ export class PgStore {
     return out;
   }
 
+  // SIM-544 (JP-1): the track-pack cache (migrations/0007_track_packs.cjs).
+  // Mirrors server/store.js's FileStore contract exactly - see its "TRACK
+  // PACKS" section header for the concept (content-addressed by <track>:
+  // <factsHash>, implicit invalidation on a facts edit via the hash change).
+  getTrackPack(cacheKey) {
+    const row = this._one("select cache_key, track, facts_hash, style_digest, blocks, created_at, updated_at from track_packs where cache_key=$1", [cacheKey]);
+    if (!row) return null;
+    return {
+      cacheKey: row.cache_key, track: row.track, factsHash: row.facts_hash, styleDigest: row.style_digest,
+      blocks: row.blocks, createdAt: row.created_at, updatedAt: row.updated_at,
+    };
+  }
+  putTrackPack(cacheKey, pack) {
+    this.pg.query(
+      `insert into track_packs (cache_key, track, facts_hash, style_digest, blocks, updated_at)
+       values ($1, $2, $3, $4, $5::jsonb, now())
+       on conflict (cache_key) do update set track=excluded.track, facts_hash=excluded.facts_hash,
+         style_digest=excluded.style_digest, blocks=excluded.blocks, updated_at=now()`,
+      [cacheKey, pack.track, pack.factsHash, pack.styleDigest || "", J(pack.blocks)],
+    );
+    return this.getTrackPack(cacheKey);
+  }
+
+  // SIM-544 (JP-1) architecture correction, 2026-07-23 - the facts store
+  // (migrations/0006_facts.cjs). Mirrors server/store.js's FileStore contract
+  // exactly - see server/facts-lib.js header for why this lives in Postgres.
+  getFacts(kind) {
+    const row = this._one("select kind, doc, updated_at from facts where kind=$1", [kind]);
+    return row ? { kind: row.kind, doc: row.doc, updatedAt: row.updated_at } : null;
+  }
+  getAllFacts() {
+    const rows = this._all("select kind, doc, updated_at from facts", []);
+    const out = {};
+    for (const kind of FACTS_KINDS) out[kind] = null;
+    for (const row of rows) out[row.kind] = { kind: row.kind, doc: row.doc, updatedAt: row.updated_at };
+    return out;
+  }
+  putFacts(kind, doc) {
+    this.pg.query(
+      `insert into facts (kind, doc, updated_at) values ($1, $2::jsonb, now())
+       on conflict (kind) do update set doc=excluded.doc, updated_at=now()`,
+      [kind, J(doc)],
+    );
+    return this.getFacts(kind);
+  }
+
   // Owner-initiated cancel of a still-queued job (SIM-543) - mirror of
   // store.js: only "queued" cancels (claimed jobs belong to the laptop,
   // outbound-only); terminal is an idempotent no-op; the canceled row uses the
@@ -1204,6 +1267,32 @@ export class PgStore {
         ["canceled by owner before a runner claimed it", id],
       );
       out = r && r.rowCount === 0 ? { ok: false, claimed: true, status: "claimed" } : { ok: true, status: "failed" };
+    });
+    return out;
+  }
+
+  // Owner-initiated re-queue of a run stuck `stalled` (SIM-562) - mirror of
+  // store.js: resets the SAME row's "queued since" clock (created_at) rather
+  // than canceling + minting a fresh id, so every consumer keyed on this runId
+  // keeps working unchanged. Same "queued only" boundary as cancelAgentJob.
+  requeueAgentJob(id) {
+    let out = { ok: false, notFound: true };
+    this._tx(() => {
+      const row = this._one("select id, status from agent_jobs where id=$1", [id]);
+      if (!row) return;
+      if (row.status === "done" || row.status === "failed" || row.status === "dead") {
+        out = { ok: false, terminal: true, status: row.status };
+        return;
+      }
+      if (row.status !== "queued") {
+        out = { ok: false, claimed: true, status: row.status };
+        return;
+      }
+      const r = this.pg.query(
+        `update agent_jobs set created_at=now(), updated_at=now() where id=$1 and status='queued'`,
+        [id],
+      );
+      out = r && r.rowCount === 0 ? { ok: false, claimed: true, status: "claimed" } : { ok: true };
     });
     return out;
   }

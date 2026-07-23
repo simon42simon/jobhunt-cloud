@@ -11,7 +11,7 @@ import { runTitle } from "../lib/runDock";
 import { hexA, runStatusMeta } from "../lib/statusColors";
 import { mmss } from "../lib/time";
 import { RelatedChips } from "./RelatedChips";
-import type { RunStatus } from "../types";
+import { isRunPending, type RunStatus } from "../types";
 import { Badge } from "ssc-ui";
 
 // Panel that tracks one routine run (a headless Claude agent). Since
@@ -35,6 +35,8 @@ import { Badge } from "ssc-ui";
 // panel; label + color come from the shared runStatusMeta).
 const CAPTION: Record<RunStatus, string> = {
   running: "Working... routines can take a few minutes",
+  "waiting-for-runner": "No laptop runner connected",
+  stalled: "Stalled - no runner has picked this up in a while",
   done: "Completed",
   failed: "Run failed - see output below",
   stopped: "Stopped before finishing",
@@ -100,6 +102,10 @@ export function RunPanel({
 
   const status: RunStatus = run?.status || "running";
   const running = status === "running";
+  // SIM-562: waiting-for-runner / stalled are pending too (not yet started,
+  // but not finished either) - distinct from `running` (which alone drives the
+  // spinner/animated bar; see StatusIcon and the progress-bar block below).
+  const pending = isRunPending(status);
   const tone = runStatusMeta(status);
   const ticketId = run && isTicketId(run.jobId) ? run.jobId : null;
 
@@ -107,9 +113,9 @@ export function RunPanel({
   // output is final then). FAIL-SOFT: the chips are an affordance, never an
   // error state - a failed tasks fetch just leaves the strip off, and a failed
   // portfolio fetch degrades to task-only chips. `run` is deliberately out of
-  // the deps: the first non-running render already carries the final output.
+  // the deps: the first non-pending render already carries the final output.
   useEffect(() => {
-    if (running || !ticketId || !onOpenEntity) return;
+    if (pending || !ticketId || !onOpenEntity) return;
     let alive = true;
     Promise.all([api.getTasks(), api.getPortfolio().catch(() => null)])
       .then(([t, p]) => {
@@ -123,16 +129,16 @@ export function RunPanel({
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running, ticketId, onOpenEntity]);
+  }, [pending, ticketId, onOpenEntity]);
 
-  // Elapsed timer: tick every second while running; when the run ends the
+  // Elapsed timer: tick every second while pending; when the run ends the
   // interval clears and `now` freezes near the completion moment (within ~1s).
   useEffect(() => {
     setNow(Date.now());
-    if (status !== "running") return;
+    if (!pending) return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [status]);
+  }, [pending]);
 
   useEffect(() => {
     if (showOutput && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
@@ -154,20 +160,25 @@ export function RunPanel({
   // Percent-done: the time estimate (elapsed vs the median of past successful
   // runs, capped at 97% so it never claims done early) FLOORED by milestone
   // progress (reaching stage i of n proves at least that fraction). null =
-  // no signal at all -> keep the indeterminate sweep.
-  const pct: number | null = !running
+  // no signal at all -> keep the indeterminate sweep. A run that is pending
+  // but NOT actively running (waiting-for-runner / stalled, SIM-562) has made
+  // no provable progress at all - 0%, never the terminal 100%.
+  const pct: number | null = !pending
     ? 1
-    : (() => {
-        const timePct = expectedMs && expectedMs > 0 ? Math.min(elapsedMs / expectedMs, 0.97) : null;
-        const stagePct = stages.length > 0 ? (stageIndex + 1) / (stages.length + 1) : null;
-        if (timePct === null && stagePct === null) return null;
-        return Math.max(timePct ?? 0, stagePct ?? 0);
-      })();
+    : !running
+      ? 0
+      : (() => {
+          const timePct = expectedMs && expectedMs > 0 ? Math.min(elapsedMs / expectedMs, 0.97) : null;
+          const stagePct = stages.length > 0 ? (stageIndex + 1) / (stages.length + 1) : null;
+          if (timePct === null && stagePct === null) return null;
+          return Math.max(timePct ?? 0, stagePct ?? 0);
+        })();
 
-  // Caption: while running prefer the agent's live activity; when done show
-  // the run's real stats when the CLI reported them.
-  const caption = running
-    ? run?.currentActivity || CAPTION.running
+  // Caption: while pending prefer the agent's/server's live activity text
+  // (waiting-for-runner and stalled carry an honest last-seen note); when done
+  // show the run's real stats when the CLI reported them.
+  const caption = pending
+    ? run?.currentActivity || CAPTION[status]
     : status === "done" && stats?.durationMs
       ? `Completed in ${mmss(stats.durationMs)}${stats.numTurns ? ` · ${stats.numTurns} turns` : ""}${
           stats.costUsd != null ? ` · $${stats.costUsd.toFixed(2)}` : ""
@@ -212,7 +223,16 @@ export function RunPanel({
           >
             Minimize
           </button>
-          {running && (
+          {status === "stalled" && (
+            <button
+              onClick={() => api.requeueRun(runId).catch(() => {})}
+              title="Reset the wait - re-queue this run for the laptop runner to pick up"
+              className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded border border-[var(--color-edge)] px-2 py-0.5 text-[11px] text-[var(--color-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-text)] sm:min-h-0 sm:min-w-0"
+            >
+              Re-queue
+            </button>
+          )}
+          {pending && (
             <button
               onClick={() => api.stopRun(runId).catch(() => {})}
               className="inline-flex min-h-[44px] min-w-[44px] items-center justify-center rounded border border-[var(--color-edge)] px-2 py-0.5 text-[11px] text-[var(--color-muted)] hover:border-rose-400/60 hover:text-rose-400 sm:min-h-0 sm:min-w-0"
@@ -367,7 +387,7 @@ export function RunPanel({
           references - each chip deep-links via App's hub-focus primitive.
           Rendered outside the collapsible output so it stays reachable with
           the output hidden. */}
-      {!running && onOpenEntity && related && related.length > 0 && (
+      {!pending && onOpenEntity && related && related.length > 0 && (
         <div className="border-t border-[var(--color-edge)] px-4 py-3">
           <RelatedChips entities={related} onOpen={onOpenEntity} />
         </div>

@@ -210,7 +210,7 @@ describe("stream-json events fold into the run record", () => {
     run = await getRun(runId);
     expect(run.status).toBe("done");
     expect(run.currentActivity).toBeNull();
-    expect(run.stats).toEqual({ durationMs: 245_000, numTurns: 23, costUsd: 1.37 });
+    expect(run.stats).toEqual({ durationMs: 245_000, numTurns: 23, costUsd: 1.37, tokens: null });
   });
 
   it("flushes a final line that arrives without a trailing newline", async () => {
@@ -287,12 +287,29 @@ describe("lib.js progress helpers", () => {
     const err = lib.agentEventToUpdate({ type: "result", subtype: "error_max_turns", result: "ran out" }, null, 2);
     expect(err.activity).toBeNull();
     expect(err.appendText).toContain("[result: error_max_turns] ran out");
-    expect(err.stats).toEqual({ durationMs: null, numTurns: null, costUsd: null });
+    expect(err.stats).toEqual({ durationMs: null, numTurns: null, costUsd: null, tokens: null });
     // success result adds NO duplicate text (the last assistant turn already streamed)...
     expect(lib.agentEventToUpdate({ type: "result", subtype: "success", result: "done" }, null, 2, true).appendText).toBe("");
     // ...but IS the fallback when nothing streamed (unrecognized turn events):
     // output must never end up emptier than the old text mode.
     expect(lib.agentEventToUpdate({ type: "result", subtype: "success", result: "done" }, null, 2, false).appendText).toBe("done\n");
+  });
+
+  it("agentEventToUpdate: SIM-574 captures token usage honestly (present -> real numbers, absent -> null, never fabricated)", () => {
+    const withUsage = lib.agentEventToUpdate(
+      {
+        type: "result",
+        subtype: "success",
+        duration_ms: 1000,
+        usage: { input_tokens: 500, output_tokens: 120, cache_read_input_tokens: 40, cache_creation_input_tokens: 0 },
+        result: "done",
+      },
+      null,
+      -1
+    );
+    expect(withUsage.stats.tokens).toEqual({ input: 500, output: 120, cacheRead: 40, cacheCreate: 0 });
+    const withoutUsage = lib.agentEventToUpdate({ type: "result", subtype: "success", duration_ms: 1000, result: "done" }, null, -1);
+    expect(withoutUsage.stats.tokens).toBeNull();
   });
 
   it("medianMs + runDurationHistory pair starts with done closes only", () => {

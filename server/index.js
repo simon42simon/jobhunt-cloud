@@ -42,6 +42,11 @@ import {
   medianMs,
   resolveUploadPolicy,
   DRAFT_ROUTINE,
+  // SIM-596 (JP-4): the nightly auto-draft scheduler's pure selection/timing
+  // helpers - see server/lib.js "SIM-596 nightly auto-draft scheduler" header.
+  todayET,
+  msUntilNextAutoDraftFire,
+  selectAutoDraftCandidates,
 } from "./lib.js";
 // Boot-time orphaned-run reconcile (SIM-70): the SAME core the standalone CLI
 // (ops/activity-log-reconcile.mjs) runs. A restart mid-run orphans the old
@@ -88,7 +93,17 @@ import {
   DEADLINE_CONTRACT_RULE,
   FETCH_MODE_PROMPTS,
   validateSourceRunResult,
+  // SIM-574 (JP-2): job-scoped generation runs self-report economics through
+  // this SAME result lane - the validator lives beside validateSourceRunResult
+  // since it is the direct template for it.
+  validateRunEconomics,
 } from "./runner-lib.js";
+// SIM-544 (JP-1): the track-pack reuse-machinery's pure cache-key/style-digest
+// helpers - see server/track-pack-lib.js header for the concept.
+import { validateTrackPackPayload } from "./track-pack-lib.js";
+// SIM-544 (JP-1) architecture correction, 2026-07-23: facts now live in this
+// server's own store, not the laptop - see server/facts-lib.js header.
+import { FACTS_KINDS, validateFactsDoc, computeFactsHash } from "./facts-lib.js";
 // SIM-393 I1 - vault->cloud sync ingest surface. The ONE shared name validator
 // (guardian GC-1) + the sync content helpers, reused by the /api/sync/* routes.
 import { isSafeName } from "./name-safety.js";
@@ -537,7 +552,50 @@ app.get("/api/config", (req, res) => {
     // SAME storeBackend signal `sse` above uses; env-overridable so the owner
     // can point it elsewhere without a code change.
     sscHubUrl: runtime.storeBackend === "pg" ? null : process.env.SSC_HUB_URL || "http://localhost:5185",
+    // SIM-577: the SAME dispatch-capability fact agentRunDispatch() is built
+    // from (CLAUDE_BIN_PRESENT, declared below - never re-derive it), surfaced
+    // so JobChat and ChatCapture can degrade honestly client-side too. Neither
+    // surface has a runner leg (chat is synchronous; ticket-scoped routines are
+    // deliberately excluded from runner routing), so "no local claude binary"
+    // means "unavailable, full stop" on this instance.
+    agentSpawnAvailable: CLAUDE_BIN_PRESENT,
   });
+});
+
+// ---- facts (SIM-544 / JP-1 architecture correction, 2026-07-23) ------------
+// The "facts trio" (resume, professional-experience, cover-letter) that used
+// to live only as ops/facts/*.yaml on the laptop, now owned by this server's
+// own store (server/facts-lib.js has the full reasoning). Plain owner-facing
+// CRUD - the SAME auth posture as every other /api/* route (the cookie gate
+// installed above when auth.enabled; open on loopback by default, matching
+// the app's whole local-first posture). Capability-gated on STORE_FACTS
+// (defense-in-depth, mirrors STORE_TRACK_PACKS) even though both backends
+// implement it today.
+//
+// NOTE for whoever wires the generation skill to this (SIM-597, cross-repo -
+// see the handoff brief): a skill running via the laptop runner or a local
+// spawn does NOT currently carry a session cookie OR a runner bearer token
+// applicable to these specific routes - that auth question is open and is
+// this handoff's first decision, not solved here.
+app.get("/api/facts", (req, res) => {
+  if (!STORE_FACTS) return res.status(501).json({ error: "facts store is not available on this backend", code: "FACTS_STORE_UNAVAILABLE" });
+  res.json({ ok: true, facts: store.getAllFacts() });
+});
+
+app.get("/api/facts/:kind", (req, res) => {
+  if (!STORE_FACTS) return res.status(501).json({ error: "facts store is not available on this backend", code: "FACTS_STORE_UNAVAILABLE" });
+  if (!FACTS_KINDS.includes(req.params.kind)) return res.status(400).json({ error: "unknown facts kind" });
+  const rec = store.getFacts(req.params.kind);
+  if (!rec) return res.status(404).json({ error: "no facts stored for this kind yet" });
+  res.json({ ok: true, facts: rec });
+});
+
+app.put("/api/facts/:kind", (req, res) => {
+  if (!STORE_FACTS) return res.status(501).json({ error: "facts store is not available on this backend", code: "FACTS_STORE_UNAVAILABLE" });
+  const v = validateFactsDoc(req.params.kind, req.body);
+  if (!v.ok) return res.status(400).json({ error: v.reason });
+  const saved = store.putFacts(req.params.kind, v.doc);
+  res.status(201).json({ ok: true, facts: saved });
 });
 
 // Container liveness probe (RC-3 / SIM-87 I8). NOT under /api/ so it bypasses the
@@ -604,6 +662,39 @@ const RUNNER_AUTH_MAX_FAILURES = 20; // per IP per window before a 429 (MF-5)
 const RUNNER_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
 const runnerAuthFailures = new Map(); // ip -> { count, resetAt }
 
+// SIM-547-style capability gate, kept as defense-in-depth even though both
+// backends implement facts/track-packs today (migrations/0006/0007): a future
+// backend that omits either degrades honestly (501) rather than crashing or
+// silently no-op'ing.
+const STORE_TRACK_PACKS = typeof store.getTrackPack === "function";
+const STORE_FACTS = typeof store.getFacts === "function";
+
+// SIM-544 track-pack reuse signal, correlated by agentJobId (an optional
+// ?agentJobId= query param the caller supplies - itself just a correlation
+// label under the runnerAuth bearer, so a mislabel only pollutes THAT
+// caller's own run's economics, never another run's). Ephemeral like the
+// `runs` Map / run.stats (SIM-574 accepts the same restart-loses-it caveat
+// those already carry) - read once at /result time, then discarded. Bounded
+// so a chatty/misbehaving caller cannot leak memory.
+const trackPackReuseSignal = new Map(); // agentJobId -> { hits, misses, cacheKeys: [] }
+const TRACK_PACK_SIGNAL_MAX_ENTRIES = 500;
+const TRACK_PACK_SIGNAL_MAX_KEYS = 20;
+function noteTrackPackSignal(agentJobId, hit, cacheKey) {
+  const id = typeof agentJobId === "string" ? agentJobId.trim().slice(0, 200) : "";
+  if (!id) return;
+  let rec = trackPackReuseSignal.get(id);
+  if (!rec) {
+    if (trackPackReuseSignal.size >= TRACK_PACK_SIGNAL_MAX_ENTRIES) return; // bounded - drop, never grow unbounded
+    rec = { hits: 0, misses: 0, cacheKeys: [] };
+    trackPackReuseSignal.set(id, rec);
+  }
+  if (hit) rec.hits += 1;
+  else rec.misses += 1;
+  if (cacheKey && rec.cacheKeys.length < TRACK_PACK_SIGNAL_MAX_KEYS && !rec.cacheKeys.includes(cacheKey)) {
+    rec.cacheKeys.push(String(cacheKey).slice(0, 200));
+  }
+}
+
 // Runner bearer-token gate (MF-5): 501 unless the runner is enabled (real mode +
 // RUNNER_TOKEN_HASH), constant-time token verify, and a per-IP failure counter so
 // /api/runner/jobs/next cannot be used as a brute-force oracle.
@@ -638,12 +729,72 @@ function runnerAuth(req, res, next) {
 // runner connected" instead of impersonating progress.
 let lastRunnerPollAt = null;
 const RUNNER_POLL_STALE_MS = 90_000; // ~6 poll intervals; beyond this the runner is "not connected"
+// SIM-562: unclaimed this long (regardless of runner liveness) crosses from
+// "honestly waiting" to "the owner should consider re-queuing" - a corpse
+// queued an hour behind a dead laptop must never rely on the owner noticing
+// the banner; the run object itself has to say so.
+const RUNNER_STALLED_MS = Number(process.env.RUNNER_STALLED_MS) || 10 * 60 * 1000; // 10 min
+
+function runnerConnected() {
+  return !!lastRunnerPollAt && Date.now() - lastRunnerPollAt <= RUNNER_POLL_STALE_MS;
+}
 
 function runnerLivenessNote() {
   if (!lastRunnerPollAt) return "No laptop runner connected since this server started — start it on the laptop (ops/agent-runner.mjs)";
-  const ageS = Math.round((Date.now() - lastRunnerPollAt) / 1000);
-  if (ageS * 1000 > RUNNER_POLL_STALE_MS) return `No laptop runner connected — last seen ${ageS}s ago; start it on the laptop (ops/agent-runner.mjs)`;
+  if (!runnerConnected()) {
+    const ageS = Math.round((Date.now() - lastRunnerPollAt) / 1000);
+    return `No laptop runner connected — last seen ${ageS}s ago; start it on the laptop (ops/agent-runner.mjs)`;
+  }
   return "Waiting for the laptop runner to pick this up";
+}
+
+// SIM-562 fix-shape point 1: the honest substate of a QUEUED (unclaimed) agent
+// job, derived from the SAME last-seen fact the banner and runnerLivenessNote
+// use - no new heartbeat. Three bands: past the stalled threshold (owner
+// action available: re-queue) beats runner-disconnected (still just waiting)
+// beats runner-connected-and-about-to-claim-it (reported as plain "running",
+// unchanged pre-SIM-562 behavior - a live runner will get to it).
+function queuedRunnerView(aj) {
+  const queuedSince = Date.parse(aj.createdAt || aj.updatedAt || "");
+  const queuedMs = Number.isFinite(queuedSince) ? Date.now() - queuedSince : 0;
+  if (queuedMs > RUNNER_STALLED_MS) {
+    return {
+      status: "stalled",
+      currentActivity: `Stalled — unclaimed for ${Math.round(queuedMs / 60000)}m; re-queue to try again`,
+    };
+  }
+  if (!runnerConnected()) return { status: "waiting-for-runner", currentActivity: runnerLivenessNote() };
+  return { status: "running", currentActivity: runnerLivenessNote() };
+}
+
+// SIM-574 (JP-2): derive a job-scoped run's self-reported economics from its
+// OWN durable progress lines (agent_jobs.progress jsonb) - the terminal
+// stream-json `result` event the runner already relays verbatim to /progress
+// (ops/agent-runner.mjs's onLine callback), reused here rather than trusting
+// anything the runner's /result body claims. Reads the STORED progress, not
+// the ephemeral `runs` Map, so this works even when this server instance
+// never saw the run live (a restart, or a different instance behind the
+// load balancer). Pure best-effort: a missing/unparseable terminal event
+// yields null, never a thrown error - deriving economics must never block a
+// result from landing (docs/agent-pipeline.md "unreported, never fake").
+function deriveRunEconomicsFromProgress(progress) {
+  const arr = Array.isArray(progress) ? progress : [];
+  let stats = null;
+  for (const line of arr) {
+    const t = String(line).trim();
+    if (!t.startsWith("{")) continue;
+    try {
+      const evt = JSON.parse(t);
+      if (evt && evt.type === "result") {
+        const upd = agentEventToUpdate(evt, null, 0, true);
+        if (upd.stats) stats = upd.stats;
+      }
+    } catch {
+      /* not a parseable event - skip */
+    }
+  }
+  if (!stats) return null;
+  return { tokens: stats.tokens || null, wallMs: stats.durationMs };
 }
 
 function mountRunnerRoutes() {
@@ -751,14 +902,79 @@ function mountRunnerRoutes() {
     },
   );
 
+  // Track-pack cache (SIM-544 / JP-1): content-addressed GET/PUT for the
+  // facts-stable generation blocks a draft run reuses across every job on the
+  // same track (docs/agent-pipeline.md "module split"). Cache key = <track>:
+  // <factsHash> (server/track-pack-lib.js) - `:track` is the only thing the
+  // URL carries; factsHash is computed SERVER-SIDE from this store's own
+  // facts (facts-lib.js computeFactsHash) on every request, since facts live
+  // here now (the 2026-07-23 architecture correction) - never trusted from a
+  // caller. This means the cache key is always self-consistent with whatever
+  // facts currently ARE: a facts edit changes the hash the very next request
+  // computes, so the old pack goes unreachable with no explicit invalidation
+  // step anywhere. runnerAuth-gated (same outbound-only bearer lane as every
+  // other runner call) and capability-gated on STORE_TRACK_PACKS.
+  app.get("/api/track-packs/:track", runnerAuth, (req, res) => {
+    if (!STORE_TRACK_PACKS) {
+      return res.status(501).json({ error: "track-pack cache is not available on this store backend", code: "TRACK_PACK_STORE_UNAVAILABLE" });
+    }
+    if (!JOB_ENUM_FIELDS.track.includes(req.params.track)) return res.status(400).json({ error: "unknown track" });
+    const factsHash = computeFactsHash(STORE_FACTS ? store.getAllFacts() : {});
+    const cacheKey = `${req.params.track}:${factsHash}`;
+    const pack = store.getTrackPack(cacheKey);
+    noteTrackPackSignal(req.query.agentJobId, !!pack, cacheKey);
+    if (!pack) return res.status(404).json({ error: "no cached pack for this track's current facts" });
+    res.json({ ok: true, pack });
+  });
+
+  app.put("/api/track-packs/:track", runnerAuth, (req, res) => {
+    if (!STORE_TRACK_PACKS) {
+      return res.status(501).json({ error: "track-pack cache is not available on this store backend", code: "TRACK_PACK_STORE_UNAVAILABLE" });
+    }
+    const factsHash = computeFactsHash(STORE_FACTS ? store.getAllFacts() : {});
+    const v = validateTrackPackPayload(req.params.track, factsHash, req.body, JOB_ENUM_FIELDS.track);
+    if (!v.ok) return res.status(400).json({ error: v.reason });
+    const saved = store.putTrackPack(v.pack.cacheKey, v.pack);
+    // A PUT is definitionally a miss-then-fill for THIS run (it just built the
+    // pack fresh rather than reusing one) - counted as a miss regardless of
+    // whether an older pack existed under a different (now-stale) key.
+    noteTrackPackSignal(req.query.agentJobId, false, v.pack.cacheKey);
+    res.status(201).json({ ok: true, pack: saved });
+  });
+
   // Finalize the job (idempotent, replay-safe). Validates the nonce + claimed-by;
   // a repeat result for a terminal job is a 200 no-op. SIM-535: the body may
   // carry a `result` payload (bounded by the global 100kb JSON cap; the runner
   // trims to fit) - for discover-jobs-source it is the {counters, finds} the
   // ingest below files; the replay-safe idempotent branch NEVER re-ingests.
+  // SIM-574 (JP-2): for job-scoped generation kinds, self-reported economics
+  // (tokens/wallMs derived server-side from the run's OWN progress, never
+  // trusted from this request body; reuseHitRate/cacheKeyProvenance from the
+  // track-pack signal above) are merged into the result BEFORE it lands, so
+  // agent_jobs.result durably carries them through this SAME result lane.
   app.post("/api/runner/jobs/:id/result", runnerAuth, (req, res) => {
     const { nonce, status, error, result } = req.body || {};
-    const bounded = result && typeof result === "object" && !Array.isArray(result) ? result : null;
+    let bounded = result && typeof result === "object" && !Array.isArray(result) ? result : null;
+    try {
+      const ajBefore = store.agentJobById(req.params.id);
+      if (ajBefore && (ajBefore.kind === "first-draft-job" || ajBefore.kind === "finalize-job")) {
+        const derived = deriveRunEconomicsFromProgress(ajBefore.progress);
+        const reuse = trackPackReuseSignal.get(req.params.id);
+        const totalLookups = reuse ? reuse.hits + reuse.misses : 0;
+        const econ = validateRunEconomics({
+          tokens: derived && derived.tokens,
+          wallMs: derived && derived.wallMs,
+          reuseHitRate: totalLookups > 0 ? reuse.hits / totalLookups : null,
+          cacheKeyProvenance: reuse ? reuse.cacheKeys : null,
+        });
+        if (econ) bounded = { ...(bounded || {}), economics: econ };
+        trackPackReuseSignal.delete(req.params.id);
+      }
+    } catch (e) {
+      // Guarded like the ingest/sync calls below: a derive hiccup must never
+      // turn a delivered result into a runner-side retry.
+      console.error(`[jobhunt] run-economics derive failed for ${req.params.id}: ${e && e.message ? e.message : e}`);
+    }
     const r = store.completeAgentJob(req.params.id, { runnerId: req.runnerId, nonce, status, error, result: bounded });
     if (r.notFound) return res.status(404).json({ error: r.reason });
     if (!r.ok) return res.status(403).json({ error: r.reason });
@@ -784,6 +1000,110 @@ function mountRunnerRoutes() {
     }
     if (r.jobId) broadcast({ type: "jobs-changed" }); // cloud has no watcher; nudge the UI
     res.json({ ok: true, idempotent: !!r.idempotent });
+  });
+}
+
+// ---- nightly auto-draft scheduler (SIM-596 / JP-4, owner-inserted 2026-07-23) ----
+// Extends the SAME outbound runner queue every other kind uses - no new dispatch
+// path. "The trigger is 100% deterministic code (SQL query + queue insert) - no
+// LLM decides when or what to run" (the ticket, extending docs/agent-pipeline.md's
+// doctrine to scheduling). SHIP DARK: the nightly timer only arms behind
+// AUTO_DRAFT_ENABLED=1 (see the boot block below) - it must not fire on a real
+// schedule until SIM-598 (the fail-closed quality gate) lands; this function and
+// the manual-fire endpoint below work regardless, for staging proof.
+const AUTO_DRAFT_WINDOW_DAYS = 3;
+const AUTO_DRAFT_CAP = 10;
+
+// Batch tier for an auto-drafted job (ROUTINES["first-draft-job"].batchModel/
+// batchEffort - "sonnet/medium", the SAME carve-out startRun applies to a large
+// local-spawn batch). NOTE: this is INTENT ONLY on the runner-queue path today -
+// ops/agent-runner.mjs (out of this lane's fence) does not yet read a tier field
+// off agent_jobs.payload and append --model/--effort the way the LOCAL-spawn
+// path's startRun does; only --agent is applied runner-side (runner-lib.js
+// RUNNER_KIND_AGENT). Threading the field now costs nothing and makes the
+// follow-up (wiring ops/agent-runner.mjs to honor it) additive, not a payload-
+// shape change. Until that lands, an auto-drafted job runs at whatever tier the
+// runner's own defaults give first-draft-job.
+function autoDraftBatchTierPayload() {
+  const def = ROUTINES["first-draft-job"] || {};
+  return { note: "auto-drafted (SIM-596 nightly scheduler)", tier: "batch", model: def.batchModel || null, effort: def.batchEffort || null };
+}
+
+// The scheduler's one entry point - called by BOTH the nightly timer and the
+// secret-gated manual-fire endpoint, so there is exactly one code path to keep
+// correct. Guarded per-job (one enqueue failure never sinks the batch) and
+// guarded overall (a store hiccup returns an honest zero-result rather than
+// throwing into a timer callback with no one to catch it). Never touches
+// finalize/submit - the ONLY kind this ever enqueues is "first-draft-job"
+// (charter: those stages stay [SIMON]-gated).
+function runAutoDraftScheduler() {
+  const today = todayET();
+  let jobs = [];
+  try {
+    jobs = store.listJobs();
+  } catch (e) {
+    console.error(`[jobhunt] auto-draft: could not list jobs: ${e && e.message ? e.message : e}`);
+    return { ok: false, drafted: 0, overflow: 0, skippedPending: 0 };
+  }
+  // isPending is applied INSIDE selection, before the cap - an already-
+  // pending job (a prior fire already queued its draft) must never occupy a
+  // cap slot and starve a genuinely new job of it.
+  const isPending = (job) => typeof store.hasPendingAgentJob === "function" && store.hasPendingAgentJob(job.id, "first-draft-job");
+  const { selected, overflow, skippedPending } = selectAutoDraftCandidates(jobs, {
+    todayET: today,
+    windowDays: AUTO_DRAFT_WINDOW_DAYS,
+    cap: AUTO_DRAFT_CAP,
+    isPending,
+  });
+  let drafted = 0;
+  const enqueuedIds = [];
+  for (const job of selected) {
+    try {
+      store.enqueueAgentJob({ kind: "first-draft-job", jobId: job.id, payload: autoDraftBatchTierPayload() });
+      drafted++;
+      enqueuedIds.push(job.id);
+    } catch (e) {
+      console.error(`[jobhunt] auto-draft: enqueue failed for ${job.id}: ${e && e.message ? e.message : e}`);
+    }
+  }
+  if (overflow > 0) {
+    console.warn(`[jobhunt] auto-draft: ${overflow} eligible job(s) exceeded the nightly cap (${AUTO_DRAFT_CAP}) and were NOT enqueued tonight`);
+  }
+  // One activity-log entry per night (docs/agent-pipeline.md cross-stage rule 4:
+  // "every run emits one observation"), regardless of whether anything fired -
+  // an empty night is still evidence the scheduler ran, not silence.
+  try {
+    store.appendActivity({ kind: "auto-draft", date: today, drafted, overflow, skippedPending, jobIds: enqueuedIds });
+  } catch (e) {
+    console.error(`[jobhunt] auto-draft: activity log append failed: ${e && e.message ? e.message : e}`);
+  }
+  if (drafted > 0) broadcast({ type: "jobs-changed" });
+  return { ok: true, drafted, overflow, skippedPending };
+}
+
+// Secret-gated manual-fire (mirrors the demo-reset endpoint above exactly:
+// constant-time compare, registered only when the secret is actually
+// configured - no anonymous surface). Works independent of AUTO_DRAFT_ENABLED
+// so staging can prove the whole path before the nightly timer is trusted to
+// run unattended. Never in demo mode (a demo instance must never touch the
+// real outbound runner queue) and never when the runner itself is not
+// configured on this instance (enqueuing onto a queue nothing will ever claim
+// is pointless accumulation, not "waiting for the laptop" - MF-3 posture).
+if (process.env.AUTO_DRAFT_FIRE_SECRET) {
+  app.post("/api/auto-draft/fire", (req, res) => {
+    const provided = Buffer.from(String(req.get("x-auto-draft-fire-secret") || ""));
+    const expected = Buffer.from(process.env.AUTO_DRAFT_FIRE_SECRET);
+    if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) {
+      return res.status(403).json({ error: "forbidden" });
+    }
+    if (DEMO_MODE) return res.status(501).json({ error: "auto-draft is disabled in demo mode" });
+    if (!runtime.runnerEnabled) return res.status(501).json({ error: "runner is not configured on this instance" });
+    try {
+      res.json(runAutoDraftScheduler());
+    } catch (e) {
+      console.error(`[jobhunt] auto-draft manual-fire failed: ${e && e.message ? e.message : e}`);
+      res.status(500).json({ error: "auto-draft run failed" });
+    }
   });
 }
 
@@ -2896,6 +3216,12 @@ function scopeIdExists(scope, id) {
 }
 
 function resolveClaude() {
+  // JOBHUNT_CLAUDE_BIN is the test seam (mirrors JOBHUNT_PYTHON): points the
+  // dispatch-capability fact CLAUDE_BIN_PRESENT below at a controlled path so
+  // the SIM-577 honest-degradation tests can force "no local claude on this
+  // instance" hermetically, without touching the owner's real config.claudeBin
+  // or laptop install.
+  if (process.env.JOBHUNT_CLAUDE_BIN) return process.env.JOBHUNT_CLAUDE_BIN;
   if (config.claudeBin && fs.existsSync(config.claudeBin)) return config.claudeBin;
   const guess = path.join(process.env.USERPROFILE || "", ".local", "bin", "claude.exe");
   if (fs.existsSync(guess)) return guess;
@@ -3472,20 +3798,27 @@ function foldRunnerProgress(run, lines) {
 // already true when the auto-advance rule reads the job), and the launch
 // endpoints' sweep below (so a dead laptop can never wedge the concurrency
 // slots or the per-job duplicate guard forever).
+// Returns the still-pending agent-job row (or null) so a caller that needs the
+// SIM-562 display substate (GET /api/routines/run/:runId) does not need a
+// second store read - `run.status` itself deliberately STAYS "running"
+// internally the whole time a job is queued/claimed/running (every dup-guard,
+// concurrency counter, and Stop gate keys off that unchanged fact); only the
+// JSON response the caller builds carries the more specific waiting-for-runner
+// / stalled substate.
 function syncRunnerRoutedRun(run) {
-  if (!run || !run.agentJobId || run.status !== "running") return;
+  if (!run || !run.agentJobId || run.status !== "running") return null;
   let aj = null;
   try {
     aj = store.agentJobById(run.agentJobId);
   } catch {
-    return; // store hiccup: leave the record for a later sync
+    return null; // store hiccup: leave the record for a later sync
   }
   if (aj) foldRunnerProgress(run, aj.progress);
   if (aj && (aj.status === "queued" || aj.status === "claimed" || aj.status === "running")) {
     // Liveness-aware wait note (SIM-543): "queued" with no runner polling is a
     // different owner situation than "queued, runner about to grab it".
     if (aj.status === "queued") run.currentActivity = runnerLivenessNote();
-    return; // genuinely pending
+    return aj; // genuinely pending
   }
   const ok = !!aj && aj.status === "done";
   if (!ok) {
@@ -3597,9 +3930,26 @@ function startRun(routine, jobId, batchId = null, extra = {}) {
   // the laptop runner queue instead of a doomed ENOENT spawn. Sitting INSIDE
   // startRun puts every launch path (single run, batch drain) behind the one
   // decision; scope + kind are both checked so ticket-scoped routines and any
-  // future non-runner routine keep the local path (and its loud failure).
+  // future non-runner routine keep the local path.
   if (def.scope === "job" && isRunnerKind(routine) && agentRunDispatch() === "runner") {
     return startRunnerRoutedRun(run, routine);
+  }
+  // SIM-577: ticket-scoped routines (assess-ticket, work-ticket) are
+  // deliberately excluded from runner routing above (b - widening runner
+  // routing to ticket scope - is a separate, out-of-scope decision) and only
+  // ever spawn locally. Consult the SAME CLAUDE_BIN_PRESENT fact the runner-
+  // routing branch is built from BEFORE attempting that spawn: on an instance
+  // with no local binary (every pg/Railway image), the spawn below used to die
+  // "[spawn error] spawn claude ENOENT" - a leaked implementation detail in
+  // ChatCapture's degrade toast, and it gave the ticket's "Awaiting CTO
+  // assessment..." spinner nothing to ever resolve on (see the client-side
+  // agentSpawnAvailable fix, GET /api/config). Fail the run immediately with a
+  // plain-language reason instead of the doomed spawn attempt.
+  if (def.scope === "ticket" && !CLAUDE_BIN_PRESENT) {
+    run.status = "failed";
+    run.output = "Agent execution runs on the laptop runner - unavailable on this instance.";
+    store.appendActivity({ kind: "run", runId, status: "failed", exitCode: null });
+    return run;
   }
   // Base argv shared by EVERY routine: `--allowedTools` (ALLOWED_TOOLS) is the
   // config-editable pre-approval tool list and `--permission-mode acceptEdits`
@@ -3870,7 +4220,11 @@ function synthesizeRunnerRun(aj) {
   };
   foldRunnerProgress(pseudo, aj.progress);
   if (aj.status === "queued") {
-    pseudo.currentActivity = runnerLivenessNote();
+    // SIM-562: a distinct status (waiting-for-runner / stalled), not just a
+    // reworded "running" - see queuedRunnerView.
+    const view = queuedRunnerView(aj);
+    pseudo.status = view.status;
+    pseudo.currentActivity = view.currentActivity;
   } else if (aj.status === "claimed" || aj.status === "running") {
     if (!pseudo.currentActivity) pseudo.currentActivity = "Running on the laptop runner";
   } else {
@@ -3907,10 +4261,19 @@ app.get("/api/routines/run/:runId", (req, res) => {
   // A runner-routed run's live state is the agent-job row; refresh on the poll
   // (progress lines -> the same stage/activity/transcript folds a local spawn
   // streams, terminal row -> the full close bookkeeping).
-  syncRunnerRoutedRun(run);
+  const queuedAj = syncRunnerRoutedRun(run);
   // Underscore fields are internal (the proc handle, the progress-fold cursor);
   // everything else is the run-panel contract, unchanged.
-  res.json(Object.fromEntries(Object.entries(run).filter(([k]) => !k.startsWith("_"))));
+  const view = Object.fromEntries(Object.entries(run).filter(([k]) => !k.startsWith("_")));
+  // SIM-562: a still-queued job overrides the RESPONSE ONLY with its honest
+  // substate (waiting-for-runner / stalled) - run.status itself stays
+  // "running" internally (see syncRunnerRoutedRun's comment).
+  if (queuedAj && queuedAj.status === "queued") {
+    const qv = queuedRunnerView(queuedAj);
+    view.status = qv.status;
+    view.currentActivity = qv.currentActivity;
+  }
+  res.json(view);
 });
 
 // Shared stop semantics for anything backed by an agent-job row (SIM-543):
@@ -3973,6 +4336,32 @@ app.post("/api/routines/run/:runId/stop", (req, res) => {
     } catch {}
     run.status = "stopped";
   }
+  res.json({ ok: true });
+});
+
+// SIM-562 fix-shape point 3: the owner's one-click way out of `stalled` - never
+// silently RUNNING for an hour with no recourse. Same "queued only" boundary
+// as Stop's cancelAgentJob (claimed/running is honestly progressing, nothing
+// to re-queue; terminal is already resolved) - store.requeueAgentJob resets
+// the SAME row's "queued since" clock rather than minting a fresh id, so the
+// runId this endpoint answers for keeps working across the whole flow (the
+// RunPanel poll, a source's run-history record) with nothing to repoint.
+app.post("/api/routines/run/:runId/requeue", (req, res) => {
+  const run = runs.get(req.params.runId);
+  if (!run && !/^aj-/.test(req.params.runId)) return res.status(404).json({ error: "run not found" });
+  const ajId = run ? run.agentJobId : req.params.runId;
+  if (!ajId) return res.status(409).json({ error: "this run has no runner job to re-queue" });
+  let r;
+  try {
+    r = store.requeueAgentJob(ajId);
+  } catch {
+    return res.status(500).json({ error: "requeue failed" });
+  }
+  if (!r.ok) {
+    if (r.notFound) return res.status(404).json({ error: "run not found" });
+    return res.status(409).json({ error: "this run is no longer queued (claimed or already finished); nothing to re-queue" });
+  }
+  if (run) run.currentActivity = runnerLivenessNote();
   res.json({ ok: true });
 });
 
@@ -4262,6 +4651,23 @@ app.post("/api/jobs/:id/chat", async (req, res) => {
     return res.json({
       disabled: true,
       reason: "The live assistant is turned off in the hosted demo.",
+      messages: history,
+    });
+  }
+  // SIM-577: consult the SAME dispatch-capability fact agentRunDispatch() is
+  // built from (CLAUDE_BIN_PRESENT) - never a second existsSync check. Chat has
+  // no runner leg (it is synchronous, 180s timeout; RUNNER_ARTIFACT_KINDS
+  // carries no chat kind), so "no local claude binary" means unavailable, full
+  // stop - every pg/Railway image ships without one, and the spawn below used
+  // to die ENOENT and leak a raw 500. Same degrade shape as the DEMO_MODE gate
+  // above (disabled/reason/messages, transcript UNCHANGED) so JobChat's
+  // existing disabled-response handling covers both without a new branch.
+  if (!CLAUDE_BIN_PRESENT) {
+    const chats = store.loadChats();
+    const history = Array.isArray(chats[folder]) ? chats[folder] : [];
+    return res.json({
+      disabled: true,
+      reason: "Agent chat runs on the laptop runner - unavailable on this instance.",
       messages: history,
     });
   }
@@ -7069,6 +7475,36 @@ if (process.env.JOBHUNT_TEST !== "1") {
         }
       }, ms).unref();
     }
+  }
+
+  // SIM-596 (JP-4) nightly auto-draft timer - SHIP DARK. Only arms behind
+  // AUTO_DRAFT_ENABLED=1: must not fire on a real schedule until SIM-598 (the
+  // fail-closed generation-quality gate) lands, so an unattended run cannot
+  // scale an unenforced quality bar (owner decision, SIM-596 description).
+  // Never in demo mode or when the runner is not configured (mirrors the
+  // manual-fire endpoint's own gates above). Self-rearming (a chain of
+  // setTimeout, each recomputing msUntilNextAutoDraftFire fresh) rather than a
+  // fixed setInterval - the ET math self-corrects across DST instead of
+  // drifting; .unref() so this timer never keeps the process alive.
+  if (process.env.AUTO_DRAFT_ENABLED === "1" && !DEMO_MODE) {
+    const armAutoDraftTimer = () => {
+      const ms = msUntilNextAutoDraftFire();
+      setTimeout(() => {
+        try {
+          if (runtime.runnerEnabled) {
+            const r = runAutoDraftScheduler();
+            console.log(`[jobhunt] auto-draft: nightly fire - drafted ${r.drafted}, overflow ${r.overflow}, skippedPending ${r.skippedPending}`);
+          } else {
+            console.log("[jobhunt] auto-draft: nightly fire skipped - runner not configured on this instance");
+          }
+        } catch (e) {
+          console.error(`[jobhunt] auto-draft: nightly fire failed: ${e && e.message ? e.message : e}`);
+        } finally {
+          armAutoDraftTimer(); // always re-arm, success or failure
+        }
+      }, ms).unref();
+    };
+    armAutoDraftTimer();
   }
 
   let debounce = null;

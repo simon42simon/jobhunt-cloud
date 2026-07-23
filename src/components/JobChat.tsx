@@ -26,21 +26,33 @@ const ROUTINE_LABEL: Record<string, string> = {
 // POST route returns an honest disabled response instead of spawning it) and
 // here client-side (a visitor never sees a working compose box to begin with).
 // `demoMode` mirrors DemoBanner/DemoTour's own appMode === "demo" check.
+//
+// SIM-577: the SAME compose-box gate now also covers the honest instance-
+// capability case (a real, non-demo cloud instance with no local claude binary
+// to spawn) via `unavailableReason` - server/index.js's GET /api/config
+// exposes agentSpawnAvailable, JobDetail turns that into this prop. Both
+// reasons collapse into one `offReason` below so the disabling logic and the
+// banner/placeholder copy never have to branch twice.
 export function JobChat({
   jobId,
   onRunSuggested,
   demoMode = false,
+  unavailableReason = null,
 }: {
   jobId: string;
   onRunSuggested: (routine: string) => void;
   demoMode?: boolean;
+  unavailableReason?: string | null;
 }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
+
+  const offReason = demoMode ? "The live assistant is turned off in the hosted demo." : unavailableReason;
 
   useEffect(() => {
     let alive = true;
@@ -60,18 +72,23 @@ export function JobChat({
 
   async function send() {
     const text = input.trim();
-    if (!text || sending || demoMode) return; // demo: no compose box reaches here, but guard anyway
+    if (!text || sending || offReason) return; // off: no compose box reaches here, but guard anyway
     setErr(null);
+    setNotice(null);
     setSending(true);
     // Optimistic user bubble so the input clears and the message shows instantly.
     setMessages((m) => [...m, { role: "user", content: text, ts: new Date().toISOString() }]);
     setInput("");
     try {
       const r = await api.postJobChat(jobId, text);
-      // SIM-425: a disabled response (demo/hosted) carries the transcript
-      // UNCHANGED, no fake reply - drop the optimistic bubble back to what the
-      // server actually holds rather than leaving an unanswered user message.
+      // SIM-425/SIM-577: a disabled response (demo, or a real instance with no
+      // local claude to spawn) carries the transcript UNCHANGED, no fake reply -
+      // drop the optimistic bubble back to what the server actually holds
+      // rather than leaving an unanswered user message, and surface WHY as a
+      // plain notice (never the rose error styling - this is an honest,
+      // expected state, not a failure).
       setMessages(r.messages);
+      if ("disabled" in r && r.disabled) setNotice(r.reason);
     } catch (e) {
       setErr(String((e as Error).message || e));
     } finally {
@@ -96,12 +113,12 @@ export function JobChat({
         A read-only assistant that answers from this job's files. It can suggest a rerun or a fix - you
         confirm it. It never edits or sends anything.
       </p>
-      {demoMode && (
+      {offReason && (
         <p
           role="status"
           className="mb-2.5 rounded-md border border-[var(--color-edge)] bg-[var(--color-panel-2)] px-3 py-2 text-[12px] leading-relaxed text-[#7a869d]"
         >
-          The live assistant is turned off in the hosted demo.
+          {offReason}
         </p>
       )}
       <div ref={listRef} className="mb-2 flex max-h-[320px] flex-col gap-2 overflow-y-auto">
@@ -144,22 +161,23 @@ export function JobChat({
         ))}
         {sending && <p className="self-start text-[12px] text-[#7a869d]">Assistant is thinking...</p>}
       </div>
+      {notice && <p className="mb-2 text-[11px] leading-relaxed text-[#7a869d]">{notice}</p>}
       {err && <div className="mb-2 text-[11px] text-rose-400">{err}</div>}
       <div className="flex items-end gap-2">
         <Textarea
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={onKeyDown}
-          placeholder={demoMode ? "Assistant unavailable in the hosted demo" : "Ask about this job, or say what to fix..."}
+          placeholder={offReason ? "Assistant unavailable" : "Ask about this job, or say what to fix..."}
           rows={2}
           className="flex-1 px-3 py-2 text-[13px]"
           aria-label="Message the job assistant"
-          disabled={demoMode}
+          disabled={!!offReason}
         />
         <button
           onClick={send}
-          disabled={demoMode || sending || !input.trim()}
-          aria-disabled={demoMode || sending || !input.trim()}
+          disabled={!!offReason || sending || !input.trim()}
+          aria-disabled={!!offReason || sending || !input.trim()}
           className="min-h-[44px] rounded-md border border-[var(--color-accent)] bg-[var(--color-accent)] px-3 py-1.5 text-[13px] font-medium text-white hover:opacity-90 disabled:opacity-50 sm:min-h-0"
         >
           Send

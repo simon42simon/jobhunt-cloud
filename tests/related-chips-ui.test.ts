@@ -94,8 +94,8 @@ describe("RunPanel renders the chip strip for finished ticket-scoped runs", () =
     expect(src).toContain("<RelatedChips entities={related} onOpen={onOpenEntity} />");
   });
 
-  it("only renders once the run has finished", () => {
-    expect(src).toMatch(/\{!running && onOpenEntity && related && related\.length > 0/);
+  it("only renders once the run has finished (SIM-562: not pending - waiting-for-runner/stalled aren't finished either)", () => {
+    expect(src).toMatch(/\{!pending && onOpenEntity && related && related\.length > 0/);
   });
 
   it("the lookup is fail-soft (chips are an affordance, never an error state)", () => {

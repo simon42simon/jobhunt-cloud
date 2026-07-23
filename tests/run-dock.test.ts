@@ -175,7 +175,8 @@ describe("runTitle / RUN_STATUS_META (one vocabulary for panel + chip)", () => {
   });
 
   it("covers every RunStatus with a label + vetted color", () => {
-    for (const status of ["running", "done", "failed", "stopped"] as const) {
+    // waiting-for-runner / stalled (SIM-562): the honest queued substates.
+    for (const status of ["running", "waiting-for-runner", "stalled", "done", "failed", "stopped"] as const) {
       const meta = runStatusMeta(status);
       expect(meta.label.length).toBeGreaterThan(0);
       expect(meta.color).toMatch(/^#[0-9a-f]{6}$/i);
@@ -201,7 +202,9 @@ describe("RunDock is ambient chrome, never a modal (source contract)", () => {
   it("chips carry the 44px-on-touch idiom and a dismiss control for finished runs", () => {
     expect(src).toContain("min-h-[44px]");
     expect(src).toContain("sm:min-h-0");
-    expect(src).toContain("{!running && (");
+    // SIM-562: gated on `pending` (not `running`) - waiting-for-runner/stalled
+    // are pending too and must not surface the finished-only dismiss-X either.
+    expect(src).toContain("{!pending && (");
     expect(src).toContain("aria-label={`Dismiss: ");
   });
 
