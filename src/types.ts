@@ -135,6 +135,13 @@ export interface AppConfig {
   // tab's handoff CTA) rather than rendering a dead localhost link. Absent (an
   // older server) is treated the same as null - no link.
   sscHubUrl?: string | null;
+  // SIM-577: can this instance spawn a local `claude` process at all (the same
+  // CLAUDE_BIN_PRESENT fact agentRunDispatch() is built from server-side)?
+  // false on every pg/Railway image. JobChat and ChatCapture's assess-ticket
+  // spinner both have no runner leg, so this is the one signal that tells them
+  // whether to degrade honestly instead of 500ing or spinning forever. Absent
+  // (an older server) is treated as available (optimistic default).
+  agentSpawnAvailable?: boolean;
 }
 
 export type PhaseStatus = "shipped" | "in_progress" | "planned" | "later";

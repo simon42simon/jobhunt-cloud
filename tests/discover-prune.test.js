@@ -94,12 +94,23 @@ beforeAll(async () => {
   process.env.JOBHUNT_JOBS_DIR = jobsDir;
   process.env.JOBHUNT_DOCS_DIR = docsDir;
   process.env.JOBHUNT_DISCOVERY_FINDS = findsFile;
+  // SIM-577: startRun() now fails scope:"ticket" routines (the work-ticket
+  // control above) immediately when CLAUDE_BIN_PRESENT is false. spawn is
+  // mocked above regardless, but CLAUDE_BIN_PRESENT is a real fs.existsSync
+  // check made at module load - a CI runner has no claude binary anywhere, so
+  // without this seam the control would short-circuit before ever reaching
+  // the mock. JOBHUNT_CLAUDE_BIN points it at a controlled, always-present
+  // path (mirrors JOBHUNT_PYTHON).
+  const fakeBin = path.join(tmpRoot, "fake-claude-binary");
+  fs.writeFileSync(fakeBin, "not a real binary - spawn is mocked in this suite", "utf8");
+  process.env.JOBHUNT_CLAUDE_BIN = fakeBin;
   vi.resetModules();
   ({ app } = await import("../server/index.js"));
 });
 
 afterAll(() => {
   delete process.env.JOBHUNT_DISCOVERY_FINDS;
+  delete process.env.JOBHUNT_CLAUDE_BIN;
   try {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   } catch {}
