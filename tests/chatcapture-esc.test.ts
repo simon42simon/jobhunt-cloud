@@ -112,7 +112,8 @@ describe("App's global Esc handler stays the bubble-phase fallback (source contr
 
   it("keeps the v0.22 Esc ladder: run panels MINIMIZE after the app overlays", () => {
     // The second Esc of the acceptance flow lands here and minimizes the
-    // newest expanded run, one per press.
-    expect(src).toContain("minimizeNewestExpanded(prev)");
+    // newest expanded run, one per press (SIM-103: now the shared
+    // hooks/useRunDock writer, not a local setRuns).
+    expect(src).toContain("minimizeNewestExpandedRun()");
   });
 });

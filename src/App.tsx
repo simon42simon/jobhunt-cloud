@@ -34,18 +34,17 @@ import { openSscHub } from "./lib/sscHub";
 import { clearRoute, jobsHash, navigate, parseRoute, useRoute } from "./lib/router";
 import { setAuthStatus, useAuthStatus } from "./lib/authSession";
 import { shortcutBlockReason } from "./lib/shortcuts";
+import { expandedRuns, launchNoteFor, minimizedRuns, type RunNote } from "./lib/runDock";
 import {
-  addRun,
-  dismissRun,
-  expandedRuns,
-  launchNoteFor,
-  minimizeNewestExpanded,
-  minimizeRun,
-  minimizedRuns,
-  restoreRun,
-  type RunNote,
-  type TrackedRun,
-} from "./lib/runDock";
+  closeTrackedBatch,
+  dismissTrackedRun,
+  minimizeNewestExpandedRun,
+  minimizeTrackedRun,
+  registerBatch,
+  registerRun,
+  restoreTrackedRun,
+  useRunDockState,
+} from "./hooks/useRunDock";
 
 // Only these high-stakes moves get a confirm popup (submit starts the response
 // clock + stamps applied; rejected/closed leave the active pipeline). Every
@@ -98,7 +97,7 @@ const TOP_BAR_FALLBACK = (
 );
 
 export default function App() {
-  const { jobs, loading, error, reload, patchLocal } = useJobs();
+  const { jobs, loading, error, reload, patchLocal, version: jobsVersion } = useJobs();
   // The ONE live view of the Discovery Sources registry (due-visibility,
   // t-1783183576588): the TopBar due-chip / "Discover due (N)" and the
   // Discovery console all read this instance, so they can never disagree.
@@ -183,23 +182,19 @@ export default function App() {
   const openJob = useCallback((id: string) => navigate(jobsHash(id)), []);
   const closeJob = useCallback(() => navigate(jobsHash()), []);
   const [adding, setAdding] = useState(false);
-  // ALL tracked runs (t-1783119823228) - the backend was always parallel
-  // (MAX_CONCURRENT_RUNS=4 + queue), but this used to be ONE `activeRun` that
-  // every launch overwrote, hiding the previous panel while its agent kept
-  // running. Now each launch APPENDS; expanded runs stack as panels
-  // bottom-right, minimized runs collapse into the bottom RunDock. All state
-  // transitions are pure lib/runDock helpers.
-  const [runs, setRuns] = useState<TrackedRun[]>([]);
+  // ALL tracked runs + the one live batch (t-1783119823228, SIM-103) - the
+  // backend was always parallel (MAX_CONCURRENT_RUNS=4 + queue), but this used
+  // to be ONE `activeRun` that every launch overwrote, hiding the previous
+  // panel while its agent kept running. Now each launch APPENDS; expanded runs
+  // stack as panels bottom-right, minimized runs collapse into the bottom
+  // RunDock. State now lives in the shared hooks/useRunDock store (not local
+  // useState) so a non-App surface can register a run or a batch too - see
+  // that module's header for why.
+  const { runs, batch } = useRunDockState();
   // Launch feedback: a 409 duplicate-scope / 429 at-capacity refusal is the
   // server working as designed and surfaces as an INFO note; only a real
   // failure gets the rose error styling (lib/runDock launchNoteFor).
   const [runNote, setRunNote] = useState<RunNote | null>(null);
-
-  // Stable append callback shared by every launch surface (Discovery,
-  // ChatCapture, runRoutine below) - never overwrites.
-  const trackRun = useCallback((run: { runId: string; label: string }) => {
-    setRuns((prev) => addRun(prev, run));
-  }, []);
 
   // The deep-link primitive (t-1783255872307, re-targeted for SIM-59): "open
   // the entity's page" from any surface that renders related-entity chips
@@ -224,11 +219,6 @@ export default function App() {
     openSscHub(config?.sscHubUrl, "decisions");
   }, [config?.sscHubUrl]);
 
-  const [activeBatch, setActiveBatch] = useState<{
-    batchId: string;
-    label: string;
-    verb: "Draft" | "Finalize" | "Discover";
-  } | null>(null);
   const [pendingMove, setPendingMove] = useState<{
     jobId: string;
     role: string;
@@ -286,7 +276,7 @@ export default function App() {
     setRunNote(null);
     try {
       const r = await api.runRoutine(routine, jobId);
-      trackRun({ runId: r.runId, label: r.label });
+      registerRun({ runId: r.runId, label: r.label });
     } catch (e) {
       setRunNote(launchNoteFor(e instanceof Error ? e.message : String(e)));
     }
@@ -312,7 +302,7 @@ export default function App() {
     setRunNote(null);
     try {
       const b = await api.batchRun("first-draft-job", targets);
-      setActiveBatch({ batchId: b.batchId, label: `Draft x${b.total}`, verb: "Draft" });
+      registerBatch({ batchId: b.batchId, label: `Draft x${b.total}`, verb: "Draft" });
     } catch (e) {
       setRunNote(launchNoteFor(e instanceof Error ? e.message : String(e)));
     }
@@ -328,7 +318,7 @@ export default function App() {
     setRunNote(null);
     try {
       const b = await api.batchRun("finalize-job", finalizeReadyJobs.map((j) => j.id));
-      setActiveBatch({ batchId: b.batchId, label: `Finalize x${b.total}`, verb: "Finalize" });
+      registerBatch({ batchId: b.batchId, label: `Finalize x${b.total}`, verb: "Finalize" });
     } catch (e) {
       setRunNote(launchNoteFor(e instanceof Error ? e.message : String(e)));
     }
@@ -355,7 +345,7 @@ export default function App() {
         discoverySources.reload(true);
         return;
       }
-      setActiveBatch({ batchId: b.batchId, label: `Discover x${b.total}`, verb: "Discover" });
+      registerBatch({ batchId: b.batchId, label: `Discover x${b.total}`, verb: "Discover" });
       // Each launch stamped its source's lastRunAt server-side, so the due
       // count just dropped - refresh the registry now rather than waiting for
       // the first source-run-finished event.
@@ -394,8 +384,8 @@ export default function App() {
         // Non-destructive: Esc MINIMIZES the newest expanded run panel to the
         // dock (one per press) instead of dropping its tracking - the run
         // keeps polling as a chip.
-        else if (runs.some((r) => !r.minimized)) setRuns((prev) => minimizeNewestExpanded(prev));
-        else if (activeBatch) setActiveBatch(null);
+        else if (runs.some((r) => !r.minimized)) minimizeNewestExpandedRun();
+        else if (batch) closeTrackedBatch();
         return;
       }
       // Shared guard (lib/shortcuts): no-op while typing in a field, on a
@@ -430,7 +420,7 @@ export default function App() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [adding, selectedJob, closeJob, pendingMove, undo, runNote, runs, activeBatch, shortcutHelp, switchView, demoMode]);
+  }, [adding, selectedJob, closeJob, pendingMove, undo, runNote, runs, batch, shortcutHelp, switchView, demoMode]);
 
   // Auto-dismiss the undo toast after a few seconds.
   useEffect(() => {
@@ -550,7 +540,7 @@ export default function App() {
           ) : view === "discovery" ? (
             <DiscoveryView
               sources={discoverySources}
-              onRunStarted={trackRun}
+              onRunStarted={registerRun}
               onPursued={(id) => {
                 reload();
                 openJob(id);
@@ -592,6 +582,7 @@ export default function App() {
             onClose={closeJob}
             onChanged={reload}
             onRun={runRoutine}
+            jobsVersion={jobsVersion}
           />
         </ErrorBoundary>
       )}
@@ -611,8 +602,8 @@ export default function App() {
               key={r.runId}
               runId={r.runId}
               label={r.label}
-              onMinimize={() => setRuns((prev) => minimizeRun(prev, r.runId))}
-              onClose={() => setRuns((prev) => dismissRun(prev, r.runId))}
+              onMinimize={() => minimizeTrackedRun(r.runId)}
+              onClose={() => dismissTrackedRun(r.runId)}
               onFinished={reload}
               onOpenEntity={openEntity}
             />
@@ -623,16 +614,16 @@ export default function App() {
           Ambient chrome - NOT aria-modal, so global shortcuts keep working. */}
       <RunDock
         runs={minimizedRuns(runs)}
-        onRestore={(id) => setRuns((prev) => restoreRun(prev, id))}
-        onDismiss={(id) => setRuns((prev) => dismissRun(prev, id))}
+        onRestore={restoreTrackedRun}
+        onDismiss={dismissTrackedRun}
         onFinished={reload}
       />
-      {activeBatch && (
+      {batch && (
         <BatchPanel
-          batchId={activeBatch.batchId}
-          label={activeBatch.label}
-          verb={activeBatch.verb}
-          onClose={() => setActiveBatch(null)}
+          batchId={batch.batchId}
+          label={batch.label}
+          verb={batch.verb}
+          onClose={closeTrackedBatch}
           onProgress={reload}
         />
       )}
@@ -681,9 +672,9 @@ export default function App() {
       )}
 
       {/* Global chat-capture surface (docs/chatbot-scoping.md v1): reachable
-          from any view. Reuses the SAME run-tracking (trackRun -> the shared
-          panel stack + dock above) as every other routine trigger in the app -
-          each launch appends, never overwrites. */}
+          from any view. Reuses the SAME run-tracking (registerRun -> the
+          shared panel stack + dock above, hooks/useRunDock) as every other
+          routine trigger in the app - each launch appends, never overwrites. */}
       {/* onViewTasks goes through switchView so a stale #/tasks/<id> route is
           stripped - it lands on the Product tab's handoff panel, not a
           leftover detail URL. */}
@@ -691,7 +682,7 @@ export default function App() {
           <main>. On a crash the surface just disappears (fallback null, still
           logged) - the rest of the app stays fully usable. */}
       <ErrorBoundary fallback={null}>
-        <ChatCapture onRunStarted={trackRun}
+        <ChatCapture onRunStarted={registerRun}
           onViewTasks={() => switchView("product")}
           onOpenEntity={openEntity}
           agentAssessmentAvailable={config ? config.agentSpawnAvailable !== false : true}
