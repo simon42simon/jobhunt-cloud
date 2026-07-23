@@ -6,6 +6,22 @@ Every shippable change gets an entry. Categories: **Added**, **Changed**, **Secu
 
 ---
 
+## [0.41.0] - 2026-07-23 07:45 ET
+
+R20 overnight release — the generation pipeline gets its reuse machinery, its fail-closed quality gate, and its recipes; the QA NO-GO fixes ship.
+
+### Added
+- **Reuse machinery + run-economics + nightly auto-draft, shipped dark (SIM-544 / SIM-574 / SIM-596, PR #16).** Facts move INTO this app's store (Postgres on pg; owner decision 2026-07-23) behind `/api/facts` CRUD; track-pack cache (`/api/track-packs/:track`, runner-bearer) keys packs off server-computed factsHash; run-economics self-reporting correlates cache hits via `agentJobId` into `agent_jobs.result.economics`; the nightly auto-draft scheduler ships behind `AUTO_DRAFT_ENABLED` (default OFF — arming was conditioned on SIM-598, which lands below).
+- **Product skills live in this repo (SIM-597, PR #17).** `skills/first-draft-job|finalize-job|profile-refresh|discover-jobs` re-homed from company-os beside the ROUTINES/runner code that dispatches them; the generation skills now read facts from the facts API and run the track-pack GET-before-build / PUT-after-build protocol (the ≥30%-cheaper mechanism, SIM-420). styleDigest spec ruled: sha256(skill file)[:12].
+- **Fail-closed generation-quality gate (SIM-598, PR #18).** Deterministic artifact gate at DRAFT time as well as finalize — a 2-page-violating CV can no longer be reported done (the exact owner-reported failure now blocks, proven in tests); criteria audit wired per the ticket.
+
+### Security
+- **Facts routes are dual-auth when app-auth is on (SIM-597 ruling).** A Bearer header on `/api/facts*` routes through `runnerAuth` (same least-privilege credential class as track-packs, constant-time verify + MF-5 failure counter); no header keeps the owner cookie gate. The bearer never unlocks non-facts routes (tests: `tests/facts-dual-auth.test.js`).
+
+### Fixed
+- **QA NO-GO trio (SIM-599; re-test on this deployed build).** Demo chat transcript crash blanked the whole app (seeded `text` vs rendered `m.content`); Jobs Table grouped mode silently dropped the Ready group (`GROUP_ORDER`); demo Discovery triage 404'd on every decision (decide route lacked the DEMO_MODE branch). Each with a regression test.
+- **JobChat/ChatCapture honest degradation on cloud (SIM-577, PR #15)** — the assess-ticket leg no longer pretends on spawnless instances.
+
 ## [0.40.0] - 2026-07-22 17:10 ET
 
 QF app-recovery release (SIM-547) — the last python dependency on the pg instance falls.
