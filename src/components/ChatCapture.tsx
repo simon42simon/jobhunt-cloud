@@ -318,6 +318,13 @@ export function ChatCapture({
   const panelRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  // SIM-601: the FAB is only in the DOM while `!open` ({!open && <button>}
+  // below), so it UNMOUNTS the moment the panel opens - the exact node
+  // previouslyFocusedRef captured is gone by the time a close would restore
+  // to it, and focus()-ing a detached element is a silent no-op (focus falls
+  // to body instead). fabRef always points at whichever FAB node is CURRENTLY
+  // mounted, so the restore effect below has a live fallback target.
+  const fabRef = useRef<HTMLButtonElement | null>(null);
   const mountedRef = useRef(true);
   // Mirror of pendingImages so the unmount-only cleanup can revoke every live
   // object URL without re-running (and revoking still-in-use URLs) on each edit.
@@ -500,8 +507,14 @@ export function ChatCapture({
   useEffect(() => {
     if (open) {
       previouslyFocusedRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    } else if (previouslyFocusedRef.current) {
+    } else if (previouslyFocusedRef.current && document.contains(previouslyFocusedRef.current)) {
       previouslyFocusedRef.current.focus();
+      previouslyFocusedRef.current = null;
+    } else if (fabRef.current) {
+      // SIM-601: the captured element (normally the FAB) is gone - it
+      // unmounted while the panel was open - so fall back to the freshly
+      // re-mounted FAB rather than silently dropping focus to body.
+      fabRef.current.focus();
       previouslyFocusedRef.current = null;
     }
   }, [open]);
@@ -1068,6 +1081,7 @@ export function ChatCapture({
     <>
       {!open && (
         <button
+          ref={fabRef}
           type="button"
           onClick={onFabClick}
           onPointerDown={onFabPointerDown}

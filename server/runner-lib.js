@@ -49,6 +49,21 @@ export function isRunnerKind(kind) {
   return typeof kind === "string" && Object.prototype.hasOwnProperty.call(RUNNER_ARTIFACT_KINDS, kind);
 }
 
+// SIM-613/615: which of a routine's PERMITTED artifact kinds (above) are
+// REQUIRED for the run to count as a success. A required kind that never lands
+// durably in job_files - rejected by the SIM-598 quality gate, refused for any
+// other reason, or simply never posted - means the run did NOT succeed, no
+// matter what the spawned process's own exit code says ("the process exited 0"
+// is not "the work succeeded" - the false-success root of SIM-615's candidate-1
+// evidence). Only first-draft-job/finalize-job gate on this: the SIM-598 gate
+// only ever rejects "cv"/"cover" bytes, and a kind with no entry here (or an
+// empty list) can never fail-closed on a missing artifact - e.g. discovery
+// posts no job artifact at all.
+export const RUNNER_REQUIRED_ARTIFACT_KINDS = {
+  "first-draft-job": ["cv", "cover"],
+  "finalize-job": ["cv", "cover"],
+};
+
 // Each whitelisted kind -> the owning agent whose persona/guardrails the local run
 // inherits (--agent), mirroring the server ROUTINES table (ADR-015). The laptop
 // runner never invents an agent; an unmapped kind is refused.

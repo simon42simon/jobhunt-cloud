@@ -159,6 +159,20 @@ describe("claim -> progress -> artifact -> result", () => {
       .send(Buffer.from("%PDF-1.4 fake"));
     expect(art.status).toBe(201);
 
+    // SIM-613/615: finalize-job requires BOTH PDFs to land (server/index.js's
+    // finalize-job recipe checks for a current cover letter AND a current CV -
+    // posting only one and reporting done is exactly the false-success bug the
+    // fail-closed rule now catches, so this end-to-end happy path posts both.
+    const cover = await request(app)
+      .post(`/api/runner/jobs/${claim.id}/artifact`)
+      .set("authorization", bearer())
+      .set("x-runner-nonce", claim.nonce)
+      .set("x-artifact-name", "Aa Role - Cover Letter.pdf")
+      .set("x-artifact-mime", "application/pdf")
+      .set("content-type", "application/pdf")
+      .send(Buffer.from("%PDF-1.4 fake"));
+    expect(cover.status).toBe(201);
+
     const res = await request(app)
       .post(`/api/runner/jobs/${claim.id}/result`)
       .set("authorization", bearer())

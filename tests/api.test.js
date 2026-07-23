@@ -325,6 +325,39 @@ describe("PATCH /api/jobs/:id", () => {
     expect(res.body.status).toBe("submitted");
     expect(res.body.applied).toBe(today);
   });
+
+  // SIM-609: the exact shape of the 26-row cloud data drift this ticket found
+  // (a lead carrying an applied date - a lead precedes even drafting, so
+  // nothing could truthfully have been submitted). Blocks it at the write
+  // boundary going forward.
+  it("refuses a NEW applied date on a job whose status is (or is becoming) lead", async () => {
+    // Alpha is status "lead" here (the round-trip test above ends it back there).
+    const alphaId = id("Alpha Role - Alpha Co");
+    const r1 = await request(app).patch(`/api/jobs/${alphaId}`).send({ status: "lead", applied: "2026-01-01" });
+    expect(r1.status).toBe(400);
+    expect(r1.body.error).toMatch(/lead/i);
+
+    // job is CURRENTLY lead; the request only sets applied (status omitted)
+    const r2 = await request(app).patch(`/api/jobs/${alphaId}`).send({ applied: "2026-01-01" });
+    expect(r2.status).toBe(400);
+
+    const after = await request(app).get(`/api/jobs/${alphaId}`);
+    expect(after.body.applied).toBeFalsy();
+  });
+
+  it("does NOT block reverting status to lead while an EXISTING applied date is left untouched (docs/data-schema.md's documented never-auto-clear asymmetry)", async () => {
+    const betaId = id("Beta Role - Beta Co");
+    const submitted = await request(app).patch(`/api/jobs/${betaId}`).send({ status: "submitted" });
+    expect(submitted.body.status).toBe("submitted");
+    const appliedDate = submitted.body.applied;
+    expect(appliedDate).toBeTruthy(); // the auto-stamp on -> submitted
+
+    // Revert status only - applied is NOT part of this request.
+    const reverted = await request(app).patch(`/api/jobs/${betaId}`).send({ status: "lead" });
+    expect(reverted.status).toBe(200);
+    expect(reverted.body.status).toBe("lead");
+    expect(reverted.body.applied).toBe(appliedDate); // the historical fact survives, unchanged
+  });
 });
 
 describe("POST /api/jobs (agent-first intake)", () => {

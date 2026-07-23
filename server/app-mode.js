@@ -2,7 +2,11 @@
 // MF-8/MF-9/MF-10). PURE + importable: every gate here is a plain function tests
 // exercise WITHOUT a socket or a database, exactly like server/auth.js.
 //
-// THE FIVE-AXIS DEMO ISOLATION (design 5.4) is enforced here at boot, FAIL-CLOSED:
+// THE FOUR-AXIS DEMO ISOLATION (design 5.4; a fifth axis - the cloud->vault
+// MIRROR lane, SIM-393 I6 - was retired 2026-07-23 per SIM-614 owner directive;
+// its MIRROR_TOKEN/MIRROR_TOKEN_HASH isolation gate was removed with it, not
+// just disabled - the demo no longer reads or gates on that env var at all)
+// is enforced here at boot, FAIL-CLOSED:
 //   - MF-9  APP_MODE is parsed STRICTLY: the process refuses to boot unless it is
 //           exactly "real" or "demo" (an absent/blank value defaults to "real",
 //           the private/laptop posture). A typo ("Demo", "DEMO", "prod") is not
@@ -66,19 +70,9 @@ export function syncEnabled(env = {}) {
   return resolveAppMode(env) === "real" && present(env.SYNC_TOKEN_HASH);
 }
 
-// True only when the cloud->vault MIRROR change-feed surface may run: REAL mode
-// AND the verify-only MIRROR_TOKEN_HASH is present (SIM-393 I6, mirroring
-// syncEnabled). The cloud holds ONLY sha256(token) as MIRROR_TOKEN_HASH; the
-// reusable plaintext lives on the laptop (~/.ssc-secrets). Demo can never satisfy
-// this - it carries no mirror material and, per GC-3 (as extended by the 2026-07-18
-// guardian delta review), the isolation gate refuses to boot if it can see any.
-export function mirrorEnabled(env = {}) {
-  return resolveAppMode(env) === "real" && present(env.MIRROR_TOKEN_HASH);
-}
-
 // True only when the EXPORT snapshot surface may run: REAL mode AND the
-// verify-only EXPORT_TOKEN_HASH is present (SIM-393 I5, mirroring syncEnabled /
-// mirrorEnabled). The cloud holds ONLY sha256(token) as EXPORT_TOKEN_HASH; the
+// verify-only EXPORT_TOKEN_HASH is present (SIM-393 I5, mirroring syncEnabled).
+// The cloud holds ONLY sha256(token) as EXPORT_TOKEN_HASH; the
 // reusable plaintext lives on the laptop (~/.ssc-secrets). Demo can never
 // satisfy this - it carries no export material and, per GC-3, the isolation
 // gate refuses to boot if it can see any.
@@ -143,12 +137,6 @@ export function resolveRuntime(env = {}) {
     if (present(env.SYNC_TOKEN) || present(env.SYNC_TOKEN_HASH)) {
       throw isoErr("demo mode must not carry any sync material (SYNC_TOKEN / SYNC_TOKEN_HASH); the demo has no vault->cloud sync lane");
     }
-    // GC-3 as extended by the SIM-393 I6 guardian delta review (2026-07-18): the
-    // mirror credential joins the same clause. The demo has no cloud->vault mirror
-    // lane and must refuse to boot if it can even SEE the mirror verify-hash.
-    if (present(env.MIRROR_TOKEN) || present(env.MIRROR_TOKEN_HASH)) {
-      throw isoErr("demo mode must not carry any mirror material (MIRROR_TOKEN / MIRROR_TOKEN_HASH); the demo has no cloud->vault mirror lane");
-    }
     // GC-3 as extended to I5 (SIM-393 export snapshot): the read-only export
     // credential joins the same clause. The demo has no export lane and must
     // refuse to boot if it can even SEE the export verify-hash.
@@ -163,7 +151,6 @@ export function resolveRuntime(env = {}) {
     storeBackend,
     runnerEnabled: runnerEnabled(env),
     syncEnabled: syncEnabled(env),
-    mirrorEnabled: mirrorEnabled(env),
     exportEnabled: exportEnabled(env),
     apifyModeAllows: apifyModeAllows(env),
     resetSecret: demo ? demoResetSecret(env) : null,

@@ -33,7 +33,7 @@
 ## How to run this charter
 
 1. Pick a target: **cloud staging** (`https://app-staging-67d7.up.railway.app`, `APP_MODE=demo`,
-   auth **required**, WebAuthn off, sync/mirror/export/runner lanes 501) is the environment the
+   auth **required**, WebAuthn off, sync/export/runner lanes 501) is the environment the
    cc-staging release gate walks. A **private cloud** instance (real data, `APP_MODE=real`, auth
    required, WebAuthn optional) and **local dev** (`npm run dev`, `:5180`/`:8787`, no auth by
    default) are the other two shapes this same image runs as (`DEPLOYMENT.md` "Environments").
@@ -97,10 +97,11 @@ re-deriving; do not restate the mechanism here).
   resolves (`src/components/LoginGate.tsx`).
 - [ ] **CC-DEMO** (staging + any `APP_MODE=demo` instance only) The demo banner
   ("Demo · Fictional seed data · Resets nightly") is visible on every screen; the Product tab is
-  absent from the top bar; `GET /api/runner/*`, `/api/sync/*`, `/api/mirror/*`, `/api/export/*`,
+  absent from the top bar; `GET /api/runner/*`, `/api/sync/*`, `/api/export/*`,
   and `POST /api/agent-jobs` all answer `501` (verify at least one via DevTools Network or a direct
-  fetch - there is no UI surface for any of these lanes to click through, `server/index.js` lines
-  582, 722-723, 945-946, 1100-1101, 1284-1285).
+  fetch - there is no UI surface for any of these lanes to click through). (SIM-614, 2026-07-23:
+  the cloud->vault `/api/mirror/*` lane this line used to also cover is retired outright - those
+  routes no longer exist at all, on any instance, so there is nothing left to verify there.)
 
 ---
 
@@ -118,7 +119,7 @@ re-deriving; do not restate the mechanism here).
 | J8 | Log in (and out) of a private/staging instance | [cloud-release] | `LoginGate` / `LoginCard` |
 | J9 | Hand off to the SSC Product Hub | [not staging-reachable] | TopBar Product tab (hidden in demo mode) |
 | J10 | The guided demo tour + reset | pointer only - see `rc4-demo-journey-spec.md` §6 | `DemoBanner` / `DemoTour` |
-| - | Sync / Mirror / Export / Runner lanes | [not staging-reachable - no UI, API-only] | n/a (covered by CC-DEMO + `docs/data-schema.md` §7.0.1) |
+| - | Sync / Export / Runner lanes | [not staging-reachable - no UI, API-only] | n/a (covered by CC-DEMO + `docs/data-schema.md` §7.0.1) |
 
 ---
 

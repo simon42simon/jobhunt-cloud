@@ -707,13 +707,16 @@ export class FileStore {
     return this._listFolderFiles(folderPath).filter((f) => !jobFile || f.name !== jobFile.name).length;
   }
 
-  // The RAW job read the cloud->vault mirror lane needs (SIM-393 I6): the job's
+  // The RAW job read the EXPORT snapshot lane needs (SIM-393 I5): the job's
   // frontmatter VERBATIM (raw fidelity, not the derived DTO) + body + the <Role>.md
-  // file name, so the laptop mirror client can reconstruct the job file
+  // file name, so the laptop export client can reconstruct the job file
   // byte-faithfully ("---\n" + yaml.dump(front) + "---\n" + body - the exact
   // createJobIfAbsent serialization) and verify it against the manifest rowSha.
   // READ-ONLY; returns null for an unknown/containment-rejected id. Same observable
-  // contract on PgStore (store-contract differential).
+  // contract on PgStore (store-contract differential). Named `mirrorJobDetail`
+  // from when it was ALSO used by the cloud->vault mirror lane (SIM-393 I6);
+  // that lane was retired outright 2026-07-23 (SIM-614) and this export caller
+  // is now the only one left - kept the name to avoid an unrelated rename churn.
   mirrorJobDetail(id) {
     const folderPath = this.jobFolderPath(id); // contained + existence-checked
     if (!folderPath) return null;

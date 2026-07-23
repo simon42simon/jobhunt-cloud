@@ -11,7 +11,7 @@ first-draft-job  ->  Simon fills the gaps page  ->  finalize-job  ->  Simon subm
 - Review date: 2026-08-14
 - Maturity: Level 3 (daily runs via routine-runner, 8/8 exit 0 on 2026-07-10 evidence; the org's closest L4 candidate)
 - Supersedes: `company-os/skills/jobhunt/first-draft-job.md` (pointer there; decision `company-os/decisions/2026-07-23-jobhunt-skills-to-app-repo.md`) · `professional-development` vault `ops/routines/first-draft-job.md` (pointer there)
-- Runtime binding: routine-runner ROUTINES key `first-draft-job` (scope job, agent application-writer, opus/high; batch runs drop to sonnet/medium per the documented carve-out; prompt `run first-draft-job for "<folder>"`). All relative paths below resolve from the professional-development vault workspace root (the runner's cwd). (Was named `job-application` until 2026-06-29.)
+- Runtime binding: routine-runner ROUTINES key `first-draft-job` (scope job, agent application-writer, opus/high; batch runs drop to sonnet/medium per the documented carve-out; prompt `run first-draft-job for "<folder>"`). All relative paths below resolve from the runner's configured local workspace root (`ops/agent-runner.mjs`'s `workspaceDir` - the parent of `JOBHUNT_JOBS_DIR`/`config.local.json` `jobsDir`) - NOT assumed to be the OneDrive `professional-development` vault (that vault is frozen and cut out of the jobhunt product loop entirely per the 2026-07-23 cord-cut decision, SIM-614/`company-os/decisions/2026-07-23-vault-cord-cut.md`). (Was named `job-application` until 2026-06-29.)
 
 ## Facts + track-pack access (SIM-597, 2026-07-23)
 
@@ -25,7 +25,11 @@ Facts live in **jobhunt-cloud's own store** (Postgres in prod; owner decision 20
   3. **404** -> build the facts-stable blocks from the facts API as below, then `PUT /api/track-packs/<track>` with `{ styleDigest, blocks }` so the NEXT job on this track hits.
   4. **501 `TRACK_PACK_STORE_UNAVAILABLE`** -> build fresh like a 404 but do NOT PUT; report it as a real anomaly, not an expected miss.
 - **`styleDigest`** (ruling on SIM-544): the generation-recipe fingerprint - first 12 hex of sha256 of THIS skill file's content at run time (`python -c "import hashlib,sys;print(hashlib.sha256(open(sys.argv[1],'rb').read()).hexdigest()[:12])" <this file>`). A recipe/style change then distinguishes stale packs; the server treats it as opaque.
-- The editing/usage rules formerly in `ops/facts/README.md` still govern (honesty guards, track buckets, no em dashes); the README stays in the vault as guidance until it migrates.
+- **Facts editing rules** (migrated from the vault `ops/facts/README.md` per the 2026-07-23 cord-cut decision, SIM-614 - this is now the canonical copy; the vault README is history only):
+  - **One canonical fact, one place.** If a number changes (quota %, applicant count, ...), update it via `PUT /api/facts/:kind`, never inside a generated CV/cover letter directly.
+  - **Track new wins in the facts store first.** Don't add a bullet directly to a generated CV variant; add it to the `professional_experience` doc under the right job + track (`PUT /api/facts/professional_experience`), then regenerate.
+  - **Hero stats** are the numbers worth repeating in cover letters and headlines - keep the list short (3-5 per job).
+  - **Quote integrity.** Achievements are written verb + object + quantified outcome; keep that voice when adding.
 
 ## Trigger
 When Simon says **"run first-draft-job"** / "first draft this posting" / "generate this posting" / "make the CV and cover letter for this", or the app launches it for a job folder. The job usually already exists as a `Jobs/<Role> - <Employer>/` folder with `status: queued` (scouted, boxes ticked). It can also be a fresh posting (PDF/URL) pasted directly in chat.
@@ -39,7 +43,7 @@ When Simon says **"run first-draft-job"** / "first draft this posting" / "genera
   - Facts kind `resume` (facts API, see "Facts + track-pack access") - titles, summaries, technical expertise, languages, education, training, involvement (per track).
   - Facts kind `professional_experience` - per-job achievements bucketed by track, plus `hero_stats` and the Maple Armor `status_note` (load-bearing honesty rules).
   - Facts kind `cover_letter` - openings, the three paragraph blocks, closing, hero phrases, current research engagements (per track).
-  - `ops/facts/README.md` (vault) - the editing/usage rules that still govern the facts content.
+  - This file's "Facts + track-pack access" section above - the editing/usage rules that govern the facts content (migrated off the vault README, SIM-614).
   - `wiki/projects/job-search-2026.md` - the project this application rolls up to.
 
 ## Steps
@@ -68,7 +72,7 @@ When Simon says **"run first-draft-job"** / "first draft this posting" / "genera
    - Then `technical_expertise`, `languages`, `education`, `training_and_certifications`.
    - **Consulting umbrella (default).** Group the concurrent advisory engagements (KARI + AmplifiedSpace + the current Fintech startup) under ONE experience entry: "Commercialization and Business Development Consultant" (or "...and Partnerships Consultant" for `industry_outreach_focused`), company "Independent Consulting", duration **"December 2022 - Present"**, one client-labeled bullet each (lead with the client name). This turns the 2024-2025 overlap into one intentional, current consulting practice. Keep AmplifiedSpace prominent (it was full-time-level). On content-heavy CVs, merge KARI+AmplifiedSpace into one bullet to hold two pages. See the `professional_experience` facts -> `metadata.consulting_grouping_convention`.
    - **Involvement-as-experience (default).** Render `involvement` as experience-style entries (position / organization / bullets, 11pt, NO dates) - not a flat bullet list - especially current/substantive roles (AEROTEC Global Partnership Coordinator; Qonference+QueerTech merged; Researcher for `industry_outreach_focused`; BITS). The renderer prints any involvement object like an experience entry automatically.
-   - **AI + automation enablement hook.** When the posting rewards it, foreground Simon's "AI application pipeline" strength (applies AI + workflow automation to streamline operations) with the governance qualifiers (FIPPA / records governance, data safety, EDI, sustainability, workplace-learning) in the summary, a skills line, and 1-2 bullets. See `ops/facts/README.md` -> "AI + automation enablement hook".
+   - **AI + automation enablement hook.** When the posting rewards it, foreground Simon's "AI application pipeline" strength (applies AI + workflow automation to streamline operations) with the governance qualifiers (FIPPA / records governance, data safety, EDI, sustainability, workplace-learning) in the summary, a skills line, and 1-2 bullets.
    - **Fill two pages (80-100% of page 2).** The CV should fill close to two full pages; lengthen experience/involvement bullets rather than leaving page 2 half-empty. The renderer warns if it is not exactly 2 pages.
    - Honesty guards: keep SI Alarms / ExcelPro as **originated / structured / advanced** pipeline (never "closed/delivered"); disclose the AmplifiedSpace/KARI concurrency per `overlap_note`.
    - Capture the tailored CV (summary, reordered per-job bullets, skills, education, languages, training, involvement) in the `cv` block of `application-content.json` (schema in the header of `ops/scripts/render_application.py`). The `resume-tailor` skill is a good driver for the tailoring; keep it truthful to the facts. There is no headline line; tune positioning via the summary. Foreground the cross-track emphasis (process optimization / administration / workflow automation / AI + AI agents) when the posting rewards it. See [[cv-cover-letter-workflow]].
@@ -147,7 +151,7 @@ A 30+ job run hit the Claude session limit and a silent render bug. Run large ba
 ## Quality bar
 - **No gaps page, no draft.** A job is not `status: drafted` until its `<Role> gaps.md` exists beside the docs (step 9); `check_consistency.py` check D enforces this.
 - **Facts are the only source.** If the posting needs a fact you do not have, do not invent it; note the gap in the job's `<Role>.md` and tell Simon to add it (via a profile-refresh run or `PUT /api/facts/:kind`), then regenerate.
-- **No em dashes** anywhere (vault rule), including inside generated CVs and cover letters.
+- **No em dashes** anywhere, including inside generated CVs and cover letters.
 - **Windows filenames**: sanitize the folder and file names; OneDrive will choke on illegal characters.
 - **One posting, one track.** Do not blend tracks in a single CV.
 - **Status, not folders.** A job's stage is its `status` frontmatter, not its location; the `Jobs/<role>/` folder never moves. Never recreate `Not Applied/`, `Queue Review/`, or `Applied/`.
@@ -156,5 +160,5 @@ A 30+ job run hit the Claude session limit and a silent render bug. Run large ba
 
 ## Related
 - [`finalize-job`](finalize-job.md) (Phase 2), [[job-search-2026]], [[cv-cover-letter-workflow]]
-- Facts API kinds `resume` / `professional_experience` / `cover_letter` (jobhunt-cloud `server/facts-lib.js`); `ops/facts/README.md` (vault, content rules)
+- Facts API kinds `resume` / `professional_experience` / `cover_letter` (jobhunt-cloud `server/facts-lib.js`); this file's "Facts editing rules" (migrated off the vault README, SIM-614)
 - Skills: `resume-tailor`, `cover-letter-generator`, `job-description-analyzer`, `resume-ats-optimizer`, `docx`, `pdf`

@@ -610,11 +610,13 @@ export class PgStore {
     return row ? Number(row.n) : 0;
   }
 
-  // The RAW job read the cloud->vault mirror lane needs (SIM-393 I6): the stored
+  // The RAW job read the EXPORT snapshot lane needs (SIM-393 I5): the stored
   // raw_frontmatter VERBATIM + body + the derived <Role>.md file name (the same
   // `${sanitizeForPath(role)}.md` FileStore.createJobIfAbsent writes, so the two
   // backends agree for any store-seeded job - store-contract differential).
-  // READ-ONLY; returns null for an unknown id.
+  // READ-ONLY; returns null for an unknown id. Named `mirrorJobDetail` from when
+  // it was ALSO used by the cloud->vault mirror lane (SIM-393 I6), retired
+  // outright 2026-07-23 (SIM-614) - export is now the only caller.
   mirrorJobDetail(id) {
     const row = this._one("select id, role, body, raw_frontmatter from jobs where id=$1", [id]);
     if (!row) return null;

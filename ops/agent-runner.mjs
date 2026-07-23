@@ -28,6 +28,7 @@ import {
   buildRunnerPrompt,
   RUNNER_KIND_AGENT,
   RUNNER_ARTIFACT_KINDS,
+  RUNNER_REQUIRED_ARTIFACT_KINDS,
   artifactKindOf,
   validateArtifact,
   isRunnerKind,
@@ -125,6 +126,10 @@ async function heartbeat(ctx, id) {
   }
 }
 
+// Returns { status, reason } - reason is the JSON body's `error` (e.g. the
+// SIM-598 gate's page-cap message) when the cloud rejected the upload, so a
+// swallowed 400 (SIM-613) can carry its real cause into the run result instead
+// of a bare console.warn no one downstream ever sees.
 async function postArtifact(ctx, id, nonce, name, mime, bytes) {
   const res = await fetch(api(ctx.cloudUrl, `/api/runner/jobs/${encodeURIComponent(id)}/artifact`), {
     method: "POST",
@@ -137,7 +142,34 @@ async function postArtifact(ctx, id, nonce, name, mime, bytes) {
     },
     body: bytes,
   });
-  return res.status;
+  let reason = null;
+  if (!res.ok) {
+    try {
+      const body = await res.json();
+      reason = body && typeof body.error === "string" ? body.error : null;
+    } catch {
+      /* a non-JSON error body still leaves the status itself informative */
+    }
+  }
+  return { status: res.status, reason };
+}
+
+// SIM-613/615: pure outcome decision, exported for the unit test. `postedKinds`
+// is the Set of artifact KINDS (cv/cover/...) that landed with a 2xx this run;
+// `failures` are plain-language notes (gate rejection, post error, ...) for the
+// error message. A non-zero process exit still wins outright (unchanged prior
+// behavior); otherwise a REQUIRED kind that never posted turns an exit-0 run
+// into a reported failure - the fail-closed rule the SIM-598 gate itself is
+// never touched to enforce.
+export function resolveRunOutcome(kind, code, spawnError, postedKinds, failures) {
+  if (code !== 0) return { status: "failed", error: spawnError || `local run exited ${code}` };
+  const required = RUNNER_REQUIRED_ARTIFACT_KINDS[kind] || [];
+  const missing = required.filter((k) => !postedKinds.has(k));
+  if (missing.length) {
+    const detail = failures.length ? ` (${failures.join("; ")})` : "";
+    return { status: "failed", error: `required artifact(s) never landed in job_files: ${missing.join(", ")}${detail}` };
+  }
+  return { status: "done", error: null };
 }
 
 async function postResult(ctx, id, nonce, status, error, result = null) {
@@ -293,6 +325,11 @@ async function processJob(ctx, job) {
     clearInterval(hb);
   }
   // Post the generated, kind-bounded outputs (only for job-scoped kinds).
+  // postedKinds/failures feed resolveRunOutcome below (SIM-613/615): a
+  // required kind that is rejected, errors, or simply never appears must sink
+  // the run's reported status - never a silent console.warn no one sees.
+  const postedKinds = new Set();
+  const failures = [];
   if (folderPath && code === 0) {
     for (const art of collectOutputs(kind, folderPath, before)) {
       try {
@@ -300,11 +337,18 @@ async function processJob(ctx, job) {
         const v = validateArtifact(kind, { name: art.name, mime: art.mime }, bytes.length);
         if (!v.ok) {
           console.warn(`runner: skipping ${art.name}: ${v.reason}`);
+          failures.push(`${art.name}: ${v.reason}`);
           continue;
         }
-        const st = await postArtifact(ctx, id, nonce, art.name, art.mime, bytes);
+        const { status: st, reason } = await postArtifact(ctx, id, nonce, art.name, art.mime, bytes);
         console.log(`runner: posted ${art.name} (${art.mime}) -> ${st}`);
+        if (st >= 200 && st < 300) {
+          postedKinds.add(v.kind);
+        } else {
+          failures.push(`${art.name} (${v.kind}): rejected ${st}${reason ? ` - ${reason}` : ""}`);
+        }
       } catch (e) {
+        failures.push(`${art.name}: ${e.message}`);
         console.warn(`runner: failed to post ${art.name}: ${e.message}`);
       }
     }
@@ -317,8 +361,9 @@ async function processJob(ctx, job) {
     result = collectSourceRunResult(sourceRun.findsFile);
     if (!result) console.warn(`runner: no readable finds file at ${sourceRun.findsFile}`);
   }
-  await postResult(ctx, id, nonce, code === 0 ? "done" : "failed", code === 0 ? null : spawnError || `local run exited ${code}`, result);
-  console.log(`runner: job ${id} (${kind}) finished code=${code}${spawnError ? ` (${spawnError})` : ""}`);
+  const outcome = resolveRunOutcome(kind, code, spawnError, postedKinds, failures);
+  await postResult(ctx, id, nonce, outcome.status, outcome.error, result);
+  console.log(`runner: job ${id} (${kind}) finished code=${code} status=${outcome.status}${outcome.error ? ` (${outcome.error})` : ""}`);
 }
 
 // ---- main loop -------------------------------------------------------------
