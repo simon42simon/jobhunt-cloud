@@ -4555,6 +4555,20 @@ app.patch("/api/jobs/:id", (req, res) => {
     // posture), so a bad value can never land in the vault; null/"" still
     // clear a field, and every other update in the same body still applies.
     const updates = dropInvalidJobEnums({ ...req.body });
+    // SIM-609: `applied` is a historical "this really happened" stamp
+    // (docs/data-schema.md Invariants) - once set it is deliberately never
+    // auto-cleared by a later status change (a job reverted away from
+    // `submitted` keeps its real applied date; that asymmetry is a documented
+    // decision, not a bug). But a NEW applied date must never be WRITTEN onto
+    // a job that IS (or is becoming) a bare "lead" - lead precedes even
+    // drafting, so nothing could truthfully have been submitted yet. This is
+    // the exact shape of the cloud data drift this ticket found (26 lead-status
+    // jobs carrying an applied date) - blocks it at the boundary going forward
+    // without touching the never-auto-clear behavior above.
+    const effectiveStatus = "status" in updates ? updates.status : rec.status;
+    if (effectiveStatus === "lead" && "applied" in updates && updates.applied) {
+      return res.status(400).json({ error: "applied cannot be set while status is lead - a lead has not been submitted" });
+    }
     // Convenience: stamp the applied date when a job first reaches "submitted".
     // rec.applied is the normalized applied value (absent/"" -> null -> falsy),
     // equivalent to the old raw !jobFile.data.applied check.
