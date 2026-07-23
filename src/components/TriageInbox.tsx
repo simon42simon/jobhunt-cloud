@@ -11,6 +11,7 @@ import { shortcutBlockReason } from "../lib/shortcuts";
 import { buildAliasIndex, findKey, isRealUrl, leadContractGaps, resolveFindSourceId } from "../lib/sources";
 import { pursueFind } from "../lib/pursue";
 import { track } from "../lib/telemetry";
+import { useRunDock } from "../hooks/useRunDock";
 
 // How a triage decision was made - the signal that measures whether the
 // keyboard-first flow (J/K/S/M/P) actually pays vs the on-screen buttons.
@@ -371,6 +372,11 @@ export function TriageInbox({
   // the empty-state Run affordance (#5) when a single source is filtered.
   onRunStarted: (run: { runId: string; label: string }) => void;
 }) {
+  // SIM-103: registerBatch is the missing half of the empty-state fan-out
+  // below - onRunStarted (registerRun) only ever covered a single run, so the
+  // unfiltered "run all due" branch had no way to surface as a first-class
+  // dock panel like every other fan-out in the app.
+  const { registerBatch } = useRunDock();
   const [view, setView] = useState<SavedView>(loadSavedView);
   const [overrides, setOverrides] = useState<Record<string, EffDecision>>({});
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
@@ -655,10 +661,11 @@ export function TriageInbox({
   // nothing to triage, offer discovery right here instead of routing back to
   // the Sources tab / TopBar. A filtered view runs THAT source (registered in
   // the dock via onRunStarted, exactly like SourcesConsole); unfiltered runs
-  // every due source (the same fan-out as the TopBar's "Discover due" - the
-  // queued batch surfaces per-source, so feedback here is the inline note and
-  // the SSE-driven soft reload when each run finishes). 409/429/locked land as
-  // a soft note, never a crash.
+  // every due source (the same fan-out as the TopBar's "Discover due" -
+  // SIM-103: now registered as the SAME first-class BatchPanel that fan-out
+  // gets, via useRunDock's registerBatch, instead of only an inline note +
+  // waiting on the next SSE-driven soft reload). 409/429/locked land as a soft
+  // note, never a crash.
   async function runFromEmptyState() {
     setRunBusy(true);
     setRunNote(null);
@@ -671,11 +678,14 @@ export function TriageInbox({
       } else {
         track("run", "discovery-finds", "run-all-due-empty-state", { journey: "J4" });
         const b = await api.runAllDue();
-        setRunNote(
-          b.batchId
-            ? `Started ${b.total} due source ${b.total === 1 ? "run" : "runs"} - new finds land here as they finish.`
-            : "No sources are due right now - open Sources to run one manually.",
-        );
+        if (b.batchId) {
+          registerBatch({ batchId: b.batchId, label: `Discover x${b.total}`, verb: "Discover" });
+          setRunNote(
+            `Started ${b.total} due source ${b.total === 1 ? "run" : "runs"} - new finds land here as they finish.`,
+          );
+        } else {
+          setRunNote("No sources are due right now - open Sources to run one manually.");
+        }
       }
     } catch (e) {
       setRunNote(String((e as Error).message || e));

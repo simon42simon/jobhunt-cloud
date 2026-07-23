@@ -255,19 +255,23 @@ describe("RunPanel gained Minimize and lost self-positioning (source contract)",
 describe("App tracks a LIST of runs and mounts the dock (source contract)", () => {
   const src = read("../src/App.tsx");
 
-  it("the single activeRun object is gone; state is TrackedRun[] via lib/runDock", () => {
+  it("the single activeRun object is gone; run+batch state comes from the shared useRunDock store", () => {
     expect(src).not.toContain("setActiveRun"); // the old overwrite path
     expect(src).not.toMatch(/const \[activeRun/);
-    expect(src).toContain("useState<TrackedRun[]>");
-    expect(src).toMatch(/from "\.\/lib\/runDock"/);
+    // SIM-103: App no longer owns `runs`/`batch` as local useState - both live
+    // in hooks/useRunDock (a module-level store, so a non-App surface can
+    // register into the SAME state App renders from).
+    expect(src).not.toContain("useState<TrackedRun[]>");
+    expect(src).toContain("useRunDockState()");
+    expect(src).toMatch(/from "\.\/hooks\/useRunDock"/);
   });
 
-  it("every launch surface appends through the one trackRun callback", () => {
-    expect(src).toContain("addRun(prev, run)");
+  it("every launch surface appends through the shared registerRun writer", () => {
     // The in-app ProductHub retired with SIM-59; Discovery + ChatCapture remain
-    // the in-app launch surfaces and both ride the same callback.
-    expect(src).toContain("onRunStarted={trackRun}");
-    expect(src).toContain("<ChatCapture onRunStarted={trackRun}");
+    // the in-app launch surfaces and both ride the same registerRun writer
+    // (hooks/useRunDock), which itself calls lib/runDock's pure addRun.
+    expect(src).toContain("onRunStarted={registerRun}");
+    expect(src).toContain("<ChatCapture onRunStarted={registerRun}");
   });
 
   it("renders one RunPanel per expanded run and the RunDock for minimized ones", () => {
@@ -282,6 +286,53 @@ describe("App tracks a LIST of runs and mounts the dock (source contract)", () =
   });
 
   it("Escape minimizes the newest expanded panel (non-destructive) instead of dropping tracking", () => {
-    expect(src).toContain("minimizeNewestExpanded(prev)");
+    expect(src).toContain("minimizeNewestExpandedRun()");
+  });
+
+  it("the TopBar fan-outs (Draft/Finalize/Discover queued) register through the shared registerBatch writer", () => {
+    expect(src).toContain('registerBatch({ batchId: b.batchId, label: `Draft x${b.total}`, verb: "Draft" });');
+    expect(src).toContain('registerBatch({ batchId: b.batchId, label: `Finalize x${b.total}`, verb: "Finalize" });');
+    expect(src).toContain('registerBatch({ batchId: b.batchId, label: `Discover x${b.total}`, verb: "Discover" });');
+  });
+});
+
+// --- SIM-103: useRunDock (the shared registerRun/registerBatch store) --------
+
+describe("useRunDock store (registerRun/registerBatch, no prop threaded from App)", () => {
+  it("registerRun appends via the same pure addRun lib/runDock already used", async () => {
+    const { registerRun, snapshotForTests, resetRunDockForTests } = await import("../src/hooks/useRunDock");
+    resetRunDockForTests();
+    registerRun({ runId: "r1", label: "Draft" });
+    expect(snapshotForTests().runs).toEqual([{ runId: "r1", label: "Draft", minimized: false }]);
+  });
+
+  it("registerBatch sets the one live batch, matching the existing single-batch-panel contract", async () => {
+    const { registerBatch, snapshotForTests, resetRunDockForTests } = await import("../src/hooks/useRunDock");
+    resetRunDockForTests();
+    expect(snapshotForTests().batch).toBeNull();
+    registerBatch({ batchId: "b1", label: "Discover x3", verb: "Discover" });
+    expect(snapshotForTests().batch).toEqual({ batchId: "b1", label: "Discover x3", verb: "Discover" });
+    // A second registration (e.g. the Finds empty-state fan-out while a TopBar
+    // batch is showing) replaces the panel - same behavior every existing
+    // single-slot call site already had.
+    registerBatch({ batchId: "b2", label: "Draft x1", verb: "Draft" });
+    expect(snapshotForTests().batch).toEqual({ batchId: "b2", label: "Draft x1", verb: "Draft" });
+  });
+
+  it("useRunDock() exposes exactly registerRun/registerBatch - the write-only surface any component can call", async () => {
+    const src = read("../src/hooks/useRunDock.ts");
+    expect(src).toContain("export function useRunDock()");
+    expect(src).toContain("registerRun");
+    expect(src).toContain("registerBatch");
+  });
+});
+
+describe("TriageInbox's empty-state 'run all due' fan-out (source contract)", () => {
+  const src = read("../src/components/TriageInbox.tsx");
+
+  it("registers the fan-out as a first-class BatchPanel via useRunDock, not just an inline note", () => {
+    expect(src).toContain('from "../hooks/useRunDock"');
+    expect(src).toContain("const { registerBatch } = useRunDock();");
+    expect(src).toContain('registerBatch({ batchId: b.batchId, label: `Discover x${b.total}`, verb: "Discover" });');
   });
 });
