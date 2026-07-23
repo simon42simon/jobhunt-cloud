@@ -5,13 +5,16 @@
 //
 // A "track pack" is the facts-stable generation blocks (CV skeleton, achievement
 // pool, cover-letter openings/closings/hero phrases - docs/agent-pipeline.md
-// "Facts-stable blocks") for ONE (track, facts-version), generated once by the
-// caller (application-writer, which alone can see ops/facts/*.yaml - facts stay
-// laptop-local by design) and cached content-addressed here so every later job on
-// that track reuses it instead of re-deriving it. The cache never sees facts
-// content - only the caller-computed hash of it - so this module (and the store
-// behind it) can live entirely in jobhunt-cloud without the facts files ever
-// leaving the laptop.
+// "Facts-stable blocks") for ONE (track, facts-version), cached content-addressed
+// so every later job on that track reuses it instead of re-deriving it.
+//
+// Architecture correction (2026-07-23): facts (server/facts-lib.js) now live in
+// jobhunt-cloud's own Postgres, not on the laptop, so `factsHash` is something
+// THIS SERVER computes itself (facts-lib.js computeFactsHash) from what it
+// already stores - never a value a caller supplies. `track` still arrives from
+// the route (a URL param, owner/agent-chosen), which is why buildTrackPackCacheKey
+// keeps validating it against the enum allowlist; `factsHash` is trusted because
+// the caller of these functions is server/index.js itself, not the network.
 
 import { sha256Hex, canonicalJson } from "./sync-lib.js";
 
@@ -20,27 +23,15 @@ import { sha256Hex, canonicalJson } from "./sync-lib.js";
 // wedge the store or blow the global 100kb JSON body limit (server/index.js
 // `app.use(express.json({ limit: "100kb" }))`) - kept comfortably under it.
 export const TRACK_PACK_MAX_BLOCKS_BYTES = 80_000;
-export const TRACK_PACK_HASH_RE = /^[0-9a-f]{16,64}$/; // caller-computed content hash, hex
+export const TRACK_PACK_HASH_RE = /^[0-9a-f]{16,64}$/; // a hex content hash
 
-// sha256 hex over the caller-supplied parts, joined with a delimiter that
-// cannot appear inside a single part (a plain string) - so ["ab", "c"] and
-// ["a", "bc"] never collide. The CALLER (the application-writer skill, which
-// has local ops/facts/*.yaml access) computes this off the facts files' bytes
-// - this module never reads facts content, only hashes strings it is handed,
-// so no facts data crosses into jobhunt-cloud.
-const CONTENT_HASH_DELIMITER = "|jp1|";
-export function computeContentHash(parts) {
-  const arr = Array.isArray(parts) ? parts : [parts];
-  const joined = arr.map((p) => String(p == null ? "" : p)).join(CONTENT_HASH_DELIMITER);
-  return sha256Hex(joined);
-}
-
-// Cache key = hash of the facts files + track id (docs/agent-pipeline.md, module
-// split section) - human-legible (the track is visible at a glance) and content-
-// addressed (factsHash alone determines reuse-vs-recompute; a facts edit that
-// changes the hash naturally invalidates exactly the affected track's packs -
-// no explicit delete needed). `tracks` is the caller's enum allowlist (index.js's
-// JOB_ENUM_FIELDS.track) so this pure module never needs the app's enum table.
+// Cache key = hash of the facts + track id (docs/agent-pipeline.md, module
+// split section) - human-legible (the track is visible at a glance) and
+// content-addressed (factsHash alone determines reuse-vs-recompute; a facts
+// edit that changes the hash naturally invalidates exactly the affected
+// track's packs - no explicit delete needed). `tracks` is the caller's enum
+// allowlist (index.js's JOB_ENUM_FIELDS.track) so this pure module never
+// needs the app's enum table.
 export function buildTrackPackCacheKey({ track, factsHash }, tracks) {
   if (!track || (Array.isArray(tracks) && !tracks.includes(track))) {
     return { ok: false, reason: "unknown track" };
@@ -70,15 +61,17 @@ export function computeStyleDigest(styleInputs) {
   return sha256Hex(canonicalJson(arr.map((p) => String(p == null ? "" : p))));
 }
 
-// Validate a track-pack PUT body. Strict-but-forgiving like validateSourceRunResult
-// (runner-lib.js): a malformed/oversized/unknown-track body is refused outright -
-// a cache write is not a place to silently coerce. Returns { ok, reason?, pack }.
-export function validateTrackPackPayload(body, tracks) {
+// Validate a track-pack PUT body ({ styleDigest?, blocks }) against a SERVER-
+// DERIVED track + factsHash (never body-supplied - see the file header).
+// Strict-but-forgiving like validateSourceRunResult (runner-lib.js): a
+// malformed/oversized body is refused outright - a cache write is not a place
+// to silently coerce. Returns { ok, reason?, pack }.
+export function validateTrackPackPayload(track, factsHash, body, tracks) {
+  const keyCheck = buildTrackPackCacheKey({ track, factsHash }, tracks);
+  if (!keyCheck.ok) return keyCheck;
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { ok: false, reason: "body must be an object" };
   }
-  const keyCheck = buildTrackPackCacheKey({ track: body.track, factsHash: body.factsHash }, tracks);
-  if (!keyCheck.ok) return keyCheck;
   const styleDigest = typeof body.styleDigest === "string" ? body.styleDigest.trim().slice(0, 128) : "";
   if (!body.blocks || typeof body.blocks !== "object" || Array.isArray(body.blocks)) {
     return { ok: false, reason: "blocks must be an object" };
@@ -91,8 +84,8 @@ export function validateTrackPackPayload(body, tracks) {
     ok: true,
     pack: {
       cacheKey: keyCheck.cacheKey,
-      track: body.track,
-      factsHash: body.factsHash,
+      track,
+      factsHash,
       styleDigest,
       blocks: body.blocks,
     },

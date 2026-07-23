@@ -98,9 +98,12 @@ import {
   // since it is the direct template for it.
   validateRunEconomics,
 } from "./runner-lib.js";
-// SIM-544 (JP-1): the track-pack reuse-machinery's pure cache-key/hash/style-
-// digest helpers - see server/track-pack-lib.js header for the concept.
+// SIM-544 (JP-1): the track-pack reuse-machinery's pure cache-key/style-digest
+// helpers - see server/track-pack-lib.js header for the concept.
 import { validateTrackPackPayload } from "./track-pack-lib.js";
+// SIM-544 (JP-1) architecture correction, 2026-07-23: facts now live in this
+// server's own store, not the laptop - see server/facts-lib.js header.
+import { FACTS_KINDS, validateFactsDoc, computeFactsHash } from "./facts-lib.js";
 // SIM-393 I1 - vault->cloud sync ingest surface. The ONE shared name validator
 // (guardian GC-1) + the sync content helpers, reused by the /api/sync/* routes.
 import { isSafeName } from "./name-safety.js";
@@ -559,6 +562,42 @@ app.get("/api/config", (req, res) => {
   });
 });
 
+// ---- facts (SIM-544 / JP-1 architecture correction, 2026-07-23) ------------
+// The "facts trio" (resume, professional-experience, cover-letter) that used
+// to live only as ops/facts/*.yaml on the laptop, now owned by this server's
+// own store (server/facts-lib.js has the full reasoning). Plain owner-facing
+// CRUD - the SAME auth posture as every other /api/* route (the cookie gate
+// installed above when auth.enabled; open on loopback by default, matching
+// the app's whole local-first posture). Capability-gated on STORE_FACTS
+// (defense-in-depth, mirrors STORE_TRACK_PACKS) even though both backends
+// implement it today.
+//
+// NOTE for whoever wires the generation skill to this (SIM-597, cross-repo -
+// see the handoff brief): a skill running via the laptop runner or a local
+// spawn does NOT currently carry a session cookie OR a runner bearer token
+// applicable to these specific routes - that auth question is open and is
+// this handoff's first decision, not solved here.
+app.get("/api/facts", (req, res) => {
+  if (!STORE_FACTS) return res.status(501).json({ error: "facts store is not available on this backend", code: "FACTS_STORE_UNAVAILABLE" });
+  res.json({ ok: true, facts: store.getAllFacts() });
+});
+
+app.get("/api/facts/:kind", (req, res) => {
+  if (!STORE_FACTS) return res.status(501).json({ error: "facts store is not available on this backend", code: "FACTS_STORE_UNAVAILABLE" });
+  if (!FACTS_KINDS.includes(req.params.kind)) return res.status(400).json({ error: "unknown facts kind" });
+  const rec = store.getFacts(req.params.kind);
+  if (!rec) return res.status(404).json({ error: "no facts stored for this kind yet" });
+  res.json({ ok: true, facts: rec });
+});
+
+app.put("/api/facts/:kind", (req, res) => {
+  if (!STORE_FACTS) return res.status(501).json({ error: "facts store is not available on this backend", code: "FACTS_STORE_UNAVAILABLE" });
+  const v = validateFactsDoc(req.params.kind, req.body);
+  if (!v.ok) return res.status(400).json({ error: v.reason });
+  const saved = store.putFacts(req.params.kind, v.doc);
+  res.status(201).json({ ok: true, facts: saved });
+});
+
 // Container liveness probe (RC-3 / SIM-87 I8). NOT under /api/ so it bypasses the
 // auth gate - a health prober carries no session cookie. Cheap store round-trip so
 // a dead DB connection surfaces as 503, not a false-healthy 200. Used by the
@@ -620,12 +659,12 @@ const RUNNER_AUTH_MAX_FAILURES = 20; // per IP per window before a 429 (MF-5)
 const RUNNER_AUTH_FAIL_WINDOW_MS = 15 * 60 * 1000;
 const runnerAuthFailures = new Map(); // ip -> { count, resetAt }
 
-// SIM-547-style capability gate: PgStore does not implement the track-pack
-// cache yet (server/pg-store.js's NOTE near completeAgentJob has the migration
-// this needs - out of this lane's fence); FileStore does (server/store.js
-// "TRACK PACKS" section). The /api/track-packs/* routes below answer an
-// honest 501 when this is false rather than a silent no-op.
+// SIM-547-style capability gate, kept as defense-in-depth even though both
+// backends implement facts/track-packs today (migrations/0006/0007): a future
+// backend that omits either degrades honestly (501) rather than crashing or
+// silently no-op'ing.
 const STORE_TRACK_PACKS = typeof store.getTrackPack === "function";
+const STORE_FACTS = typeof store.getFacts === "function";
 
 // SIM-544 track-pack reuse signal, correlated by agentJobId (an optional
 // ?agentJobId= query param the caller supplies - itself just a correlation
@@ -863,36 +902,40 @@ function mountRunnerRoutes() {
   // Track-pack cache (SIM-544 / JP-1): content-addressed GET/PUT for the
   // facts-stable generation blocks a draft run reuses across every job on the
   // same track (docs/agent-pipeline.md "module split"). Cache key = <track>:
-  // <factsHash> (server/track-pack-lib.js) - the CALLER computes factsHash off
-  // ops/facts/*.yaml bytes (which never leave the laptop); this cloud store
-  // never sees facts content, only the caller-computed hash + the resulting
-  // blocks. runnerAuth-gated: only an authenticated agent run may read/write
-  // the cache (same outbound-only bearer lane as every other runner call).
-  // Capability-gated on STORE_TRACK_PACKS: PgStore does not implement this yet
-  // (see server/pg-store.js's NOTE - a migration out of this lane's fence), so
-  // a cloud deployment answers an honest 501 rather than a silent no-op.
-  app.get("/api/track-packs/:cacheKey", runnerAuth, (req, res) => {
+  // <factsHash> (server/track-pack-lib.js) - `:track` is the only thing the
+  // URL carries; factsHash is computed SERVER-SIDE from this store's own
+  // facts (facts-lib.js computeFactsHash) on every request, since facts live
+  // here now (the 2026-07-23 architecture correction) - never trusted from a
+  // caller. This means the cache key is always self-consistent with whatever
+  // facts currently ARE: a facts edit changes the hash the very next request
+  // computes, so the old pack goes unreachable with no explicit invalidation
+  // step anywhere. runnerAuth-gated (same outbound-only bearer lane as every
+  // other runner call) and capability-gated on STORE_TRACK_PACKS.
+  app.get("/api/track-packs/:track", runnerAuth, (req, res) => {
     if (!STORE_TRACK_PACKS) {
       return res.status(501).json({ error: "track-pack cache is not available on this store backend", code: "TRACK_PACK_STORE_UNAVAILABLE" });
     }
-    const pack = store.getTrackPack(req.params.cacheKey);
-    noteTrackPackSignal(req.query.agentJobId, !!pack, req.params.cacheKey);
-    if (!pack) return res.status(404).json({ error: "no cached pack for this key" });
+    if (!JOB_ENUM_FIELDS.track.includes(req.params.track)) return res.status(400).json({ error: "unknown track" });
+    const factsHash = computeFactsHash(STORE_FACTS ? store.getAllFacts() : {});
+    const cacheKey = `${req.params.track}:${factsHash}`;
+    const pack = store.getTrackPack(cacheKey);
+    noteTrackPackSignal(req.query.agentJobId, !!pack, cacheKey);
+    if (!pack) return res.status(404).json({ error: "no cached pack for this track's current facts" });
     res.json({ ok: true, pack });
   });
 
-  app.put("/api/track-packs/:cacheKey", runnerAuth, (req, res) => {
+  app.put("/api/track-packs/:track", runnerAuth, (req, res) => {
     if (!STORE_TRACK_PACKS) {
       return res.status(501).json({ error: "track-pack cache is not available on this store backend", code: "TRACK_PACK_STORE_UNAVAILABLE" });
     }
-    const v = validateTrackPackPayload(req.body, JOB_ENUM_FIELDS.track);
+    const factsHash = computeFactsHash(STORE_FACTS ? store.getAllFacts() : {});
+    const v = validateTrackPackPayload(req.params.track, factsHash, req.body, JOB_ENUM_FIELDS.track);
     if (!v.ok) return res.status(400).json({ error: v.reason });
-    if (v.pack.cacheKey !== req.params.cacheKey) return res.status(400).json({ error: "cacheKey mismatch between URL and body" });
-    const saved = store.putTrackPack(req.params.cacheKey, v.pack);
+    const saved = store.putTrackPack(v.pack.cacheKey, v.pack);
     // A PUT is definitionally a miss-then-fill for THIS run (it just built the
     // pack fresh rather than reusing one) - counted as a miss regardless of
     // whether an older pack existed under a different (now-stale) key.
-    noteTrackPackSignal(req.query.agentJobId, false, req.params.cacheKey);
+    noteTrackPackSignal(req.query.agentJobId, false, v.pack.cacheKey);
     res.status(201).json({ ok: true, pack: saved });
   });
 

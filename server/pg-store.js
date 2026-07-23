@@ -55,6 +55,9 @@ import { mintNonce, constantTimeEqualHex, RUNNER_LEASE_MS, RUNNER_MAX_ATTEMPTS }
 // front validation), so the two backends can never drift on sync semantics.
 import { assertSafeName } from "./name-safety.js";
 import { sha256Hex, rowShaOf, validateJobFront } from "./sync-lib.js";
+// SIM-544 (JP-1) architecture correction, 2026-07-23 - shared with FileStore
+// so the two backends can never drift on what a facts kind is.
+import { FACTS_KINDS } from "./facts-lib.js";
 
 // WRITABLE_FIELDS -> jobs column. Keys are the ONLY frontmatter fields the surgical
 // patch may touch (mirrors updateFrontmatter's gate); column names are constants.
@@ -1195,26 +1198,51 @@ export class PgStore {
     return out;
   }
 
-  // NOTE (SIM-544 / JP-1): PgStore deliberately does NOT implement
-  // getTrackPack/putTrackPack (server/store.js's FileStore does - see its
-  // "TRACK PACKS" section for the contract). A durable cloud-side track-pack
-  // cache needs a new table:
-  //   CREATE TABLE track_packs (
-  //     cache_key   text PRIMARY KEY,     -- `<track>:<factsHash>`
-  //     track       text NOT NULL,
-  //     facts_hash  text NOT NULL,
-  //     style_digest text,
-  //     blocks      jsonb NOT NULL,
-  //     created_at  timestamptz NOT NULL DEFAULT now(),
-  //     updated_at  timestamptz NOT NULL DEFAULT now()
-  //   );
-  // Adding that migration is OUT OF FENCE for the lane that wrote this
-  // (jp-pipeline writes only server/, src/, tests/, docs/agent-pipeline.md -
-  // migrations/ is not in that allowlist) - routed to the integrator/a
-  // migration-authorized lane. Until it lands, server/index.js's
-  // STORE_TRACK_PACKS capability probe (`typeof store.getTrackPack ===
-  // "function"`) is false on PgStore, and the /api/track-packs/* routes
-  // answer an honest 501 rather than a silent no-op or a fake success.
+  // SIM-544 (JP-1): the track-pack cache (migrations/0007_track_packs.cjs).
+  // Mirrors server/store.js's FileStore contract exactly - see its "TRACK
+  // PACKS" section header for the concept (content-addressed by <track>:
+  // <factsHash>, implicit invalidation on a facts edit via the hash change).
+  getTrackPack(cacheKey) {
+    const row = this._one("select cache_key, track, facts_hash, style_digest, blocks, created_at, updated_at from track_packs where cache_key=$1", [cacheKey]);
+    if (!row) return null;
+    return {
+      cacheKey: row.cache_key, track: row.track, factsHash: row.facts_hash, styleDigest: row.style_digest,
+      blocks: row.blocks, createdAt: row.created_at, updatedAt: row.updated_at,
+    };
+  }
+  putTrackPack(cacheKey, pack) {
+    this.pg.query(
+      `insert into track_packs (cache_key, track, facts_hash, style_digest, blocks, updated_at)
+       values ($1, $2, $3, $4, $5::jsonb, now())
+       on conflict (cache_key) do update set track=excluded.track, facts_hash=excluded.facts_hash,
+         style_digest=excluded.style_digest, blocks=excluded.blocks, updated_at=now()`,
+      [cacheKey, pack.track, pack.factsHash, pack.styleDigest || "", J(pack.blocks)],
+    );
+    return this.getTrackPack(cacheKey);
+  }
+
+  // SIM-544 (JP-1) architecture correction, 2026-07-23 - the facts store
+  // (migrations/0006_facts.cjs). Mirrors server/store.js's FileStore contract
+  // exactly - see server/facts-lib.js header for why this lives in Postgres.
+  getFacts(kind) {
+    const row = this._one("select kind, doc, updated_at from facts where kind=$1", [kind]);
+    return row ? { kind: row.kind, doc: row.doc, updatedAt: row.updated_at } : null;
+  }
+  getAllFacts() {
+    const rows = this._all("select kind, doc, updated_at from facts", []);
+    const out = {};
+    for (const kind of FACTS_KINDS) out[kind] = null;
+    for (const row of rows) out[row.kind] = { kind: row.kind, doc: row.doc, updatedAt: row.updated_at };
+    return out;
+  }
+  putFacts(kind, doc) {
+    this.pg.query(
+      `insert into facts (kind, doc, updated_at) values ($1, $2::jsonb, now())
+       on conflict (kind) do update set doc=excluded.doc, updated_at=now()`,
+      [kind, J(doc)],
+    );
+    return this.getFacts(kind);
+  }
 
   // Owner-initiated cancel of a still-queued job (SIM-543) - mirror of
   // store.js: only "queued" cancels (claimed jobs belong to the laptop,
