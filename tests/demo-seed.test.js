@@ -125,6 +125,27 @@ describe("demo seed determinism", () => {
       }
     }
   });
+
+  // SIM-599 / t-1784782689793: the seeded transcript used a `text` key; the
+  // client renders m.content (JobChat -> MarkdownLite, which calls .replace on
+  // it), so opening the seeded chat job's drawer crashed the whole demo app.
+  // Pin the seed to the client's ChatMessage contract: role + string content
+  // + ts on every message.
+  it("SIM-599: seeded chat messages carry the ChatMessage contract (content + ts, never a bare `text` key)", () => {
+    const ds = generate(1);
+    const transcripts = Object.values(ds.chats);
+    expect(transcripts.length).toBeGreaterThan(0);
+    for (const messages of transcripts) {
+      expect(messages.length).toBeGreaterThan(0);
+      for (const m of messages) {
+        expect(["user", "assistant"]).toContain(m.role);
+        expect(typeof m.content, `message ${JSON.stringify(m)} must carry string content`).toBe("string");
+        expect(m.content.trim()).not.toBe("");
+        expect(typeof m.ts, `message ${JSON.stringify(m)} must carry a ts stamp`).toBe("string");
+        expect(Number.isNaN(Date.parse(m.ts))).toBe(false);
+      }
+    }
+  });
 });
 
 // SIM-390 item 5 - the discovery/velocity texture (journey-spec 3.3/3.4) and the

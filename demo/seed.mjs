@@ -395,13 +395,20 @@ export function generate(seedVersion = 1, { refDate = null } = {}) {
     }
   }
 
-  // A per-job chat transcript for the first artifact-bearing job.
+  // A per-job chat transcript for the first artifact-bearing job. Messages
+  // carry the client's ChatMessage contract (src/types.ts): `content` + `ts` -
+  // NOT `text` (SIM-599 / t-1784782689793: the old `text` key rendered as
+  // undefined in JobChat and crashed the drawer).
   const chats = {};
   const chatJob = jobs.find((j) => j.artifacts.length);
   if (chatJob) {
     chats[chatJob.id] = [
-      { role: "user", text: `What makes me a fit for ${chatJob.role}?` },
-      { role: "assistant", text: "Fictional demo answer: your invented sample experience aligns well." },
+      { role: "user", content: `What makes me a fit for ${chatJob.role}?`, ts: dayISO(4) },
+      {
+        role: "assistant",
+        content: "Fictional demo answer: your invented sample experience aligns well.",
+        ts: new Date(Date.parse(dayISO(4)) + 60000).toISOString(),
+      },
     ];
   }
 

@@ -119,10 +119,15 @@ export function JobChat({
                 : "self-start border-[var(--color-edge)] bg-[var(--color-panel-2)]"
             }`}
           >
+            {/* Tolerant render (SIM-599 / t-1784782689793): a transcript message
+                with a missing/malformed `content` (e.g. a stored payload written
+                under another key) renders as an empty bubble - MarkdownLite
+                calls .replace on its text, so an undefined here crashed the
+                whole app (the drawer mounts outside <main>'s ErrorBoundary). */}
             {m.role === "assistant" ? (
-              <MarkdownLite text={m.content} />
+              <MarkdownLite text={m.content ?? ""} />
             ) : (
-              <span className="whitespace-pre-wrap">{m.content}</span>
+              <span className="whitespace-pre-wrap">{m.content ?? ""}</span>
             )}
             {m.suggestedAction && ROUTINE_LABEL[m.suggestedAction.routine] && (
               <button
