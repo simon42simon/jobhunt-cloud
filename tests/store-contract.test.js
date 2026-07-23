@@ -621,7 +621,9 @@ describe.each(backends)("Store contract [$name]", ({ make }) => {
       expect(store.countJobFiles("Analyst - OCI")).toBe(2);
     });
 
-    // ---- mirror raw job read (SIM-393 I6): both backends, identical shape ----
+    // ---- raw job read for the export snapshot lane (SIM-393 I5; originally also
+    // used by the now-retired SIM-393 I6 cloud->vault mirror lane, SIM-614): both
+    // backends, identical shape ----
     it("mirrorJobDetail returns the RAW front + body + <Role>.md name, rowSha matching the manifest", () => {
       seedJob();
       const d = store.mirrorJobDetail("Analyst - OCI");

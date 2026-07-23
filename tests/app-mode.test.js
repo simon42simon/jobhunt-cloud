@@ -7,7 +7,6 @@ import {
   resolveRuntime,
   runnerEnabled,
   syncEnabled,
-  mirrorEnabled,
   exportEnabled,
   apifyModeAllows,
   demoResetSecret,
@@ -105,18 +104,6 @@ describe("resolveRuntime demo isolation (MF-8 allowlist, MF-9 token-absence)", (
     expect(() => resolveRuntime(env)).toThrow(/must not carry any sync material/);
   });
 
-  it("GC-3 (I6 delta review): FAILS CLOSED if the demo can see a MIRROR_TOKEN (anything real)", () => {
-    const env = validDemoEnv();
-    env.MIRROR_TOKEN = "should-not-be-here";
-    expect(() => resolveRuntime(env)).toThrow(/must not carry any mirror material/);
-  });
-
-  it("GC-3 (I6 delta review): FAILS CLOSED if the demo can see a MIRROR_TOKEN_HASH (verify-only material)", () => {
-    const env = validDemoEnv();
-    env.MIRROR_TOKEN_HASH = "abc123";
-    expect(() => resolveRuntime(env)).toThrow(/must not carry any mirror material/);
-  });
-
   it("GC-3 (I5): FAILS CLOSED if the demo can see an EXPORT_TOKEN (anything real)", () => {
     const env = validDemoEnv();
     env.EXPORT_TOKEN = "should-not-be-here";
@@ -127,6 +114,13 @@ describe("resolveRuntime demo isolation (MF-8 allowlist, MF-9 token-absence)", (
     const env = validDemoEnv();
     env.EXPORT_TOKEN_HASH = "abc123";
     expect(() => resolveRuntime(env)).toThrow(/must not carry any export material/);
+  });
+
+  it("SIM-614: the retired MIRROR lane is no longer gated at all - a leftover MIRROR_TOKEN_HASH in the env does NOT block demo boot (the axis was removed, not just disabled)", () => {
+    const env = validDemoEnv();
+    env.MIRROR_TOKEN_HASH = "leftover-from-before-the-retirement";
+    expect(() => resolveRuntime(env)).not.toThrow();
+    expect(resolveRuntime(env)).not.toHaveProperty("mirrorEnabled");
   });
 });
 
@@ -139,7 +133,6 @@ describe("real-mode runtime + gates", () => {
       storeBackend: "file",
       runnerEnabled: false,
       syncEnabled: false,
-      mirrorEnabled: false,
       exportEnabled: false,
       apifyModeAllows: false,
       resetSecret: null,
@@ -160,14 +153,7 @@ describe("real-mode runtime + gates", () => {
     expect(syncEnabled({ APP_MODE: "demo", SYNC_TOKEN_HASH: "h" })).toBe(false);
   });
 
-  it("mirrorEnabled requires real mode AND a MIRROR_TOKEN_HASH (SIM-393 I6, mirrors syncEnabled)", () => {
-    expect(mirrorEnabled({ MIRROR_TOKEN_HASH: "h" })).toBe(true);
-    expect(mirrorEnabled({})).toBe(false);
-    // demo can never enable the mirror feed even if material somehow leaked past the gate
-    expect(mirrorEnabled({ APP_MODE: "demo", MIRROR_TOKEN_HASH: "h" })).toBe(false);
-  });
-
-  it("exportEnabled requires real mode AND an EXPORT_TOKEN_HASH (SIM-393 I5, mirrors mirrorEnabled)", () => {
+  it("exportEnabled requires real mode AND an EXPORT_TOKEN_HASH (SIM-393 I5, mirrors syncEnabled)", () => {
     expect(exportEnabled({ EXPORT_TOKEN_HASH: "h" })).toBe(true);
     expect(exportEnabled({})).toBe(false);
     // demo can never enable the export surface even if material somehow leaked past the gate

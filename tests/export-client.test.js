@@ -18,8 +18,8 @@
 //     and UNVERIFIED snapshots are never auto-deleted.
 //   - The GC-2 run report posts one line per run (verified flag included).
 //
-// The api object is faked in-memory (same technique as mirror-client.test.js):
-// runExportSnapshot takes { api } by injection, so no socket is involved.
+// The api object is faked in-memory: runExportSnapshot takes { api } by
+// injection, so no socket is involved.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
@@ -27,7 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import yaml from "js-yaml";
 import { sha256Hex, rowShaOf } from "../server/sync-lib.js";
-import { reconstructJobFileText } from "../ops/mirror-vault.mjs";
+import { reconstructJobFileText } from "../ops/cloud-client.mjs";
 import {
   runExportSnapshot,
   runPrune,
@@ -355,7 +355,7 @@ describe("GC-7: prune stays cold", () => {
   });
 });
 
-describe("createExportApi (GC-6 posture, reused from the mirror client)", () => {
+describe("createExportApi (GC-6 posture, reused from the shared ops/cloud-client.mjs)", () => {
   it("refuses http, TLS bypass, and redirects; pins the host; adds the text reader", async () => {
     expect(() => createExportApi({ token: "t", cloudUrl: "http://insecure.example" })).toThrow(/https/);
     expect(() =>

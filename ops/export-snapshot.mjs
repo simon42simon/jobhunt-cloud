@@ -39,11 +39,15 @@
 // prove a refused name produces NO write of any kind.
 //
 // GC-6: outbound-only pinned-host posture, REUSED (not re-implemented) from the
-// mirror client's `createApi` - https-only, host pinned from the configured
-// cloud URL, redirect-refusing fetch, TLS-bypass refusal re-asserted on every
-// request. (Its error strings carry the "mirror:" prefix of the shared module;
-// cosmetic only.) This process opens NO listening socket (prove with
-// ops/scripts/assert-rc-no-listener.ps1 while it runs).
+// shared `ops/cloud-client.mjs` module's `createApi` - https-only, host pinned
+// from the configured cloud URL, redirect-refusing fetch, TLS-bypass refusal
+// re-asserted on every request. (That module's own error strings carry a
+// "cloud-client:" prefix; cosmetic only.) This process opens NO listening
+// socket (prove with ops/scripts/assert-rc-no-listener.ps1 while it runs).
+// SIM-614 (2026-07-23): `createApi`/`acquireLock`/`reconstructJobFileText` used
+// to live in ops/mirror-vault.mjs (the SIM-393 I6 cloud->vault mirror client,
+// since retired outright); they were extracted to ops/cloud-client.mjs first so
+// removing the mirror lane did not touch this still-live I5 export lane.
 //
 // VERIFIED semantics: the marker is written ONLY after the verification pass
 // re-fetches the manifest + every domain and asserts an EXACT match against the
@@ -82,8 +86,8 @@ import { assertTlsNotBypassed } from "../server/runner-lib.js";
 import { sha256Hex, rowShaOf } from "../server/sync-lib.js";
 import { resolveDataDir } from "../server/lib.js";
 // GC-6 posture + the lockfile + the byte-faithful <Role>.md serialization are
-// REUSED from the mirror client so the two laptop lanes can never drift.
-import { createApi, acquireLock, reconstructJobFileText } from "./mirror-vault.mjs";
+// shared with (never re-implemented for) other laptop ops clients.
+import { createApi, acquireLock, reconstructJobFileText } from "./cloud-client.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 

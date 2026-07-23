@@ -1,13 +1,15 @@
 // SIM-393 I5 - the export snapshot surface: exportAuth (401 anon / 501
 // unconfigured / rate-limited failures / SIM-386 feed), GET-only enforced as
 // MIDDLEWARE (405 on any other verb, with POST /api/export/runs as the ONE
-// sanctioned bounded report route), the gap-fill domain reads, and the FULL
-// cross-auth matrix as extended by the I6 landing-check carried condition:
-// EXPORT_TOKEN 401s every sync route AND every mirror route (and the runner
-// lane, and the cookie gate); SYNC/MIRROR/RUNNER tokens 401 every export route.
+// sanctioned bounded report route), the gap-fill domain reads, and the
+// cross-auth matrix: EXPORT_TOKEN 401s every sync route (and the runner lane,
+// and the cookie gate); SYNC/RUNNER tokens 401 every export route.
 //
-// Boots the app in real mode with ALL FOUR token hashes so every direction of
-// the matrix is provable. Mirrors tests/sync-endpoints.test.js.
+// Boots the app in real mode with all three still-live token hashes so every
+// direction of the matrix is provable. Mirrors tests/sync-endpoints.test.js.
+// (SIM-614, 2026-07-23: this suite used to also carry a fourth lane, the
+// cloud->vault MIRROR token - retired outright; its cross-auth legs here were
+// removed rather than left asserting against routes that no longer exist.)
 
 import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import request from "supertest";
@@ -19,7 +21,6 @@ import { hashToken } from "../server/runner-lib.js";
 
 const EXPORT_TOKEN = "export-token-abcdefghij-1234567890";
 const SYNC_TOKEN = "sync-token-abcdefghij-1234567890";
-const MIRROR_TOKEN = "mirror-token-abcdefghij-1234567890";
 const RUNNER_TOKEN = "runner-token-zyxwvu-0987654321";
 const sh = (b) => crypto.createHash("sha256").update(b).digest("hex");
 const bearer = (t) => `Bearer ${t}`;
@@ -35,9 +36,9 @@ const buffered = (req) =>
   });
 
 // ---------------------------------------------------------------------------
-// Block A: real mode, auth OFF, all four lanes configured.
+// Block A: real mode, auth OFF, all three lanes configured.
 // ---------------------------------------------------------------------------
-describe("export surface (real mode, all four token lanes configured)", () => {
+describe("export surface (real mode, all three token lanes configured)", () => {
   let app, tmpRoot, dataDir;
 
   beforeAll(async () => {
@@ -61,9 +62,7 @@ describe("export surface (real mode, all four token lanes configured)", () => {
     delete process.env.JOBHUNT_AUTH_HASH;
     process.env.EXPORT_TOKEN_HASH = hashToken(EXPORT_TOKEN);
     process.env.SYNC_TOKEN_HASH = hashToken(SYNC_TOKEN);
-    process.env.MIRROR_TOKEN_HASH = hashToken(MIRROR_TOKEN);
     process.env.RUNNER_TOKEN_HASH = hashToken(RUNNER_TOKEN);
-    process.env.MIRROR_LONGPOLL_HOLD_MS = "50"; // never hold a poll in tests
     vi.resetModules();
     ({ app } = await import("../server/index.js"));
 
@@ -92,9 +91,7 @@ describe("export surface (real mode, all four token lanes configured)", () => {
   afterAll(() => {
     delete process.env.EXPORT_TOKEN_HASH;
     delete process.env.SYNC_TOKEN_HASH;
-    delete process.env.MIRROR_TOKEN_HASH;
     delete process.env.RUNNER_TOKEN_HASH;
-    delete process.env.MIRROR_LONGPOLL_HOLD_MS;
     delete process.env.JOBHUNT_DATA_DIR;
     try {
       fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -255,8 +252,8 @@ describe("export surface (real mode, all four token lanes configured)", () => {
     });
   });
 
-  describe("cross-auth matrix (GC-2c + the I6 landing-check carried condition)", () => {
-    it("EXPORT_TOKEN 401s on EVERY sync route (incl. the dual-credential manifest)", async () => {
+  describe("cross-auth matrix (GC-2c)", () => {
+    it("EXPORT_TOKEN 401s on EVERY sync route (the manifest included - sync-only now that the mirror lane is retired)", async () => {
       const h = { authorization: bearer(EXPORT_TOKEN) };
       expect((await request(app).get("/api/sync/manifest").set(h)).status).toBe(401);
       expect((await request(app).post("/api/sync/jobs").set(h).send({ id: "X - Y", role: "X", employer: "Y", front: {} })).status).toBe(401);
@@ -264,31 +261,13 @@ describe("export surface (real mode, all four token lanes configured)", () => {
       expect((await request(app).post("/api/sync/runs").set(h).send({})).status).toBe(401);
     });
 
-    it("EXPORT_TOKEN 401s on EVERY mirror route (carried condition, both directions)", async () => {
-      const h = { authorization: bearer(EXPORT_TOKEN) };
-      expect((await request(app).get("/api/mirror/changes?since=-1").set(h)).status).toBe(401);
-      expect((await request(app).get(`/api/mirror/jobs/${encodeURIComponent(JOB)}`).set(h)).status).toBe(401);
-      expect((await request(app).get(`/api/mirror/jobs/${encodeURIComponent(JOB)}/files/x.md`).set(h)).status).toBe(401);
-      expect((await request(app).post("/api/mirror/runs").set(h).send({})).status).toBe(401);
-    });
-
     it("EXPORT_TOKEN 401s on the runner lane", async () => {
       expect((await request(app).get("/api/runner/jobs/next").set("authorization", bearer(EXPORT_TOKEN))).status).toBe(401);
-    });
-
-    it("MIRROR_TOKEN 401s on the export surface (the reverse carried direction)", async () => {
-      expect((await request(app).get("/api/export/manifest").set("authorization", bearer(MIRROR_TOKEN))).status).toBe(401);
-      expect((await request(app).get("/api/export/tasks").set("authorization", bearer(MIRROR_TOKEN))).status).toBe(401);
     });
 
     it("SYNC_TOKEN and RUNNER_TOKEN 401 on the export surface", async () => {
       expect((await request(app).get("/api/export/manifest").set("authorization", bearer(SYNC_TOKEN))).status).toBe(401);
       expect((await request(app).get("/api/export/meta").set("authorization", bearer(RUNNER_TOKEN))).status).toBe(401);
-    });
-
-    it("the pre-existing directions still hold: MIRROR opens the shared manifest, SYNC does not open mirror", async () => {
-      expect((await request(app).get("/api/sync/manifest").set("authorization", bearer(MIRROR_TOKEN))).status).toBe(200);
-      expect((await request(app).get(`/api/mirror/jobs/${encodeURIComponent(JOB)}`).set("authorization", bearer(SYNC_TOKEN))).status).toBe(401);
     });
   });
 
@@ -394,4 +373,4 @@ describe("export surface disabled when not configured (501)", () => {
 // REAL mode) plus the explicit `if (DEMO_MODE)` first line of exportAuth. The
 // BINDING demo guarantee - GC-3, that a demo REFUSES TO BOOT if EXPORT_TOKEN or
 // EXPORT_TOKEN_HASH is present at all - is proven deterministically in
-// tests/app-mode.test.js (same posture as the sync/mirror lanes).
+// tests/app-mode.test.js (same posture as the sync lane).
