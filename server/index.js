@@ -577,7 +577,14 @@ app.get("/api/config", (req, res) => {
     // Product tab, reached through doors that fix did not close. Reuse the
     // SAME storeBackend signal `sse` above uses; env-overridable so the owner
     // can point it elsewhere without a code change.
-    sscHubUrl: runtime.storeBackend === "pg" ? null : process.env.SSC_HUB_URL || "http://localhost:5185",
+    // SIM-611: on pg (hosted), a REAL cloud hub now exists - JOBHUNT_SSC_HUB_URL
+    // (set per-environment on Railway, SIM-550) renders the Product link; unset
+    // keeps the honest null fallback (the pre-cloud-hub SIM-426 posture). The
+    // local path keeps its SSC_HUB_URL / localhost default unchanged.
+    sscHubUrl:
+      runtime.storeBackend === "pg"
+        ? process.env.JOBHUNT_SSC_HUB_URL || null
+        : process.env.SSC_HUB_URL || "http://localhost:5185",
     // SIM-577: the SAME dispatch-capability fact agentRunDispatch() is built
     // from (CLAUDE_BIN_PRESENT, declared below - never re-derive it), surfaced
     // so JobChat and ChatCapture can degrade honestly client-side too. Neither
