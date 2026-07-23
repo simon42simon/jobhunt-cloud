@@ -560,6 +560,9 @@ app.get("/healthz", (req, res) => {
 function resetDemoData() {
   if (typeof store.resetAll !== "function") return;
   store.resetAll();
+  // The finds-triage overlay resets with the rest of the demo data (SIM-599):
+  // decisions are demo state like everything else, not survivors of a reset.
+  demoFindDecisions.clear();
   // refDate = reset time: the nightly reset re-anchors the seed's relative dates
   // to the new day (deterministic per calendar day; SIM-390 item 5).
   applyDemoSeed(store, generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() }));
@@ -4477,6 +4480,18 @@ function normalizeDiscoveryDump(json) {
 // real workbook. This helper is the ONE place the workbook is read, so
 // /api/discovery and the sources join can never drift on caching or lock
 // handling.
+// DEMO-ONLY triage overlay (SIM-599 / t-1784782719366): the demo's finds are
+// GENERATOR-served on every read (the DEMO_MODE branch below, never the
+// discovery_finds table), so a triage decision has no row to land on -
+// /api/discovery/decide used to fall through to the STORE_FINDS lookup and 404
+// on every Skip/Maybe. Decisions are kept here, keyed by the same tolerant
+// Title + Link locator decideFind/discovery.py use, and overlaid onto the
+// generated finds at read time. Process-local by design (the demo posture:
+// anonymous shared state, reset with the rest of the demo data).
+const demoFindDecisions = new Map();
+const demoFindKey = (title, link) =>
+  String(title || "").trim().toLowerCase() + "\n" + String(link || "").trim();
+
 function readDiscovery(cb) {
   // DEMO MODE (SIM-390 item 5): the demo box has no discovery workbook and never
   // shells out to python - serve the deterministic seeded finds straight from the
@@ -4485,7 +4500,11 @@ function readDiscovery(cb) {
   if (DEMO_MODE) {
     try {
       const ds = generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() });
-      return cb(null, { config: [], discoveries: ds.finds || [], runLog: [] }, { locked: false });
+      const discoveries = (ds.finds || []).map((f) => {
+        const k = demoFindKey(f.Title, f.Link);
+        return demoFindDecisions.has(k) ? { ...f, Decision: demoFindDecisions.get(k) } : f;
+      });
+      return cb(null, { config: [], discoveries, runLog: [] }, { locked: false });
     } catch {
       return cb(null, { config: [], discoveries: [], runLog: [] }, { locked: false });
     }
@@ -4652,6 +4671,30 @@ app.post("/api/discovery/decide", (req, res) => {
   const dec = String(decision || "").trim().toLowerCase();
   if (!DISCOVERY_DECISIONS.includes(dec)) {
     return res.status(400).json({ error: "decision must be one of: skip, maybe, pursue, clear" });
+  }
+  // DEMO MODE (SIM-599 / t-1784782719366): demo reads serve GENERATOR finds
+  // (readDiscovery's DEMO_MODE branch), never discovery_finds rows - so the
+  // STORE_FINDS lookup below matched nothing and every demo triage 404'd.
+  // Decide against the SAME seeded finds the reads serve, recording the
+  // decision in the process-local overlay readDiscovery applies. Matching
+  // mirrors decideFind: title trimmed case-insensitive; a blank link falls
+  // back to title alone. A genuinely unknown row still 404s.
+  if (DEMO_MODE) {
+    try {
+      const ds = generateDemoSeed(process.env.SEED_VERSION || 1, { refDate: new Date() });
+      const t = String(title).trim().toLowerCase();
+      const l = String(link || "").trim();
+      const rows = (ds.finds || []).filter(
+        (f) =>
+          String(f.Title || "").trim().toLowerCase() === t &&
+          (l === "" || String(f.Link || "").trim() === l)
+      );
+      if (!rows.length) return res.status(404).json({ error: "no matching discovery row for that title + link" });
+      for (const f of rows) demoFindDecisions.set(demoFindKey(f.Title, f.Link), dec === "clear" ? "" : dec);
+      return res.json({ ok: true, title, link: link || "", decision: dec, output: `DECIDED ${rows.length} row(s)` });
+    } catch (e) {
+      return res.status(500).json({ error: "Could not write the decision: " + String(e.message || e) });
+    }
   }
   // SIM-547: a finds-capable store triages the row in the table - same
   // Title + Link locator, same 404 on no match (discovery.py's exit 3), no
