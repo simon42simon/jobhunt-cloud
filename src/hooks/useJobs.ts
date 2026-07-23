@@ -14,6 +14,13 @@ export function useJobs() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const reloadTimer = useRef<number | null>(null);
+  // Bumped every time a reload runs, regardless of what triggered it (the
+  // jobs-changed SSE debounce below, or a poll-detected run finish via
+  // RunPanel/RunDock's onFinished=reload wiring in App). SIM-441: on
+  // instances with no working SSE (sse:false, e.g. the pg-backed demo) this
+  // is the ONLY live signal that "something changed" - the open job detail
+  // drawer rides it to refresh its FILES panel after a completing run.
+  const [version, setVersion] = useState(0);
 
   const reload = useCallback(async () => {
     try {
@@ -24,6 +31,7 @@ export function useJobs() {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
+      setVersion((v) => v + 1);
     }
   }, []);
 
@@ -50,5 +58,5 @@ export function useJobs() {
     setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, ...updates } : j)));
   }, []);
 
-  return { jobs, loading, error, reload, patchLocal };
+  return { jobs, loading, error, reload, patchLocal, version };
 }

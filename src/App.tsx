@@ -98,7 +98,7 @@ const TOP_BAR_FALLBACK = (
 );
 
 export default function App() {
-  const { jobs, loading, error, reload, patchLocal } = useJobs();
+  const { jobs, loading, error, reload, patchLocal, version: jobsVersion } = useJobs();
   // The ONE live view of the Discovery Sources registry (due-visibility,
   // t-1783183576588): the TopBar due-chip / "Discover due (N)" and the
   // Discovery console all read this instance, so they can never disagree.
@@ -592,6 +592,7 @@ export default function App() {
             onClose={closeJob}
             onChanged={reload}
             onRun={runRoutine}
+            jobsVersion={jobsVersion}
           />
         </ErrorBoundary>
       )}

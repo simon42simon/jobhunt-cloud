@@ -180,6 +180,14 @@ export function isRunForJob(event: { jobId?: string | null }, openJobId: string)
   return !!openJobId && event.jobId === openJobId;
 }
 
+// SIM-441: should a bump of App's jobs-reload version trigger a drawer
+// refetch? True on every change EXCEPT the first observation (undefined
+// `prevVersion`, i.e. the drawer's own mount) - a version this drawer has
+// already seen is not a change. Pure + exported for the unit test.
+export function shouldRefetchOnVersionBump(prevVersion: number | undefined, nextVersion: number): boolean {
+  return prevVersion !== undefined && prevVersion !== nextVersion;
+}
+
 // min-h-[44px] on touch (relaxed at >= sm, the app-wide tap-target idiom) so the
 // Status select - the drawer's primary status-change control - and the other
 // field editors are one-handed-thumb friendly at phone widths.
@@ -192,12 +200,19 @@ export function JobDetailDrawer({
   onClose,
   onChanged,
   onRun,
+  jobsVersion,
 }: {
   jobId: string;
   config: AppConfig | null;
   onClose: () => void;
   onChanged: () => void;
   onRun: (routine: string, jobId: string) => void;
+  // Bumped by App's useJobs on every reload (SIM-441), whatever triggered it -
+  // a jobs-changed SSE frame OR a poll-detected run finish (RunPanel/RunDock's
+  // onFinished=reload, which works with no live stream at all). Optional so a
+  // caller that doesn't track it yet still compiles; the fallback refetch
+  // below simply never fires without it.
+  jobsVersion?: number;
 }) {
   const [job, setJob] = useState<JobDetailT | null>(null);
   const [saving, setSaving] = useState(false);
@@ -344,6 +359,19 @@ export function JobDetailDrawer({
   useEventSubscription("run-finished", (e) => {
     if (isRunForJob(e, jobId)) refetch();
   });
+
+  // Fallback for instances with no working SSE (sse:false, e.g. the pg-backed
+  // demo - SIM-441, cc-staging GATE 2 walk): the run-finished subscription
+  // above never fires there, so a completing canned Draft/Finalize replay left
+  // the open drawer's FILES panel stale (attach worked, board card + status
+  // updated live via RunPanel's poll-driven reload, but the drawer only ever
+  // fetched once on open). Riding the SAME reload App's board already uses -
+  // whatever triggered it - covers every instance, live-stream or not.
+  const jobsVersionRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    if (shouldRefetchOnVersionBump(jobsVersionRef.current, jobsVersion ?? 0)) refetch();
+    jobsVersionRef.current = jobsVersion ?? 0;
+  }, [jobsVersion, refetch]);
 
   // Drawer upload (SIM-393 I4): a minimal attach affordance on the Files list.
   // The server is authoritative (insert-only unique-name derivation, size +
