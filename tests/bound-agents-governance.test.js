@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 // The routine runner runs each PRODUCT routine AS its owning Career Delivery
 // agent via `claude --agent <id>` (server/index.js ROUTINES). That moved
 // LOAD-BEARING behavioral rules (never auto-submit, generate-from-facts,
-// local-only, personal-Chrome-only / never the maplearmor work browser, data
+// local-only, the browser rule (any connected Chrome, SIM-581), data
 // sovereignty, no em dashes ...) onto the runtime path from files this repo
 // does NOT track - ~/.claude/agents/<id>.md - which are editable outside any
 // repo diff or release gate. The runtime already fails CLOSED if an agent id is
