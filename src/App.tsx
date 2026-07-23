@@ -579,14 +579,21 @@ export default function App() {
         </ErrorBoundary>
       </main>
 
+      {/* Per-surface boundary (t-1783145481687 posture, added under SIM-599 /
+          t-1784782689793): the drawer mounts OUTSIDE <main>'s boundary, so a
+          render crash inside it (e.g. a malformed transcript message) used to
+          white-screen the WHOLE app. Contain it to the default "could not
+          render this view" pane instead - the board stays usable. */}
       {selectedJob && (
-        <JobDetailDrawer
-          jobId={selectedJob}
-          config={config}
-          onClose={closeJob}
-          onChanged={reload}
-          onRun={runRoutine}
-        />
+        <ErrorBoundary>
+          <JobDetailDrawer
+            jobId={selectedJob}
+            config={config}
+            onClose={closeJob}
+            onChanged={reload}
+            onRun={runRoutine}
+          />
+        </ErrorBoundary>
       )}
       {/* Expanded run panels: one per non-minimized tracked run, stacked
           bottom-right in launch order (they can no longer overlap-hide each
