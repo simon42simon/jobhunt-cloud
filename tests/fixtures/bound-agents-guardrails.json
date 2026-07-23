@@ -34,16 +34,10 @@
           "flags": "i"
         },
         {
-          "id": "browser-personal-chrome",
-          "description": "Must land on the user's PERSONAL / default Chrome before driving the browser.",
-          "pattern": "personal\\s*/\\s*default\\s+Chrome",
-          "flags": "i"
-        },
-        {
-          "id": "browser-never-maplearmor",
-          "description": "NEVER the maplearmor (work) browser, and never fall back to it.",
-          "pattern": "never\\s+use\\s+the\\s+.?maplearmor.?\\s*\\(work\\)",
-          "flags": "i"
+          "id": "browser-any-connected-chrome",
+          "description": "Browser rule (owner decision 2026-07-22, SIM-581, kernel home company-os/os/enablement-model.md): ANY connected Chrome may be used; the prior personal-only browser-profile restriction is RETIRED. The file must carry the new rule.",
+          "pattern": "use\\s+ANY\\s+connected\\s+Chrome",
+          "flags": ""
         },
         {
           "id": "data-sovereignty-off-machine",
@@ -105,16 +99,10 @@
           "flags": "i"
         },
         {
-          "id": "browser-personal-chrome",
-          "description": "Must select the user's PERSONAL / default Chrome before driving the browser.",
-          "pattern": "personal\\s*/\\s*default\\s+Chrome",
-          "flags": "i"
-        },
-        {
-          "id": "browser-never-maplearmor",
-          "description": "NEVER the maplearmor (work) browser, and never fall back to it.",
-          "pattern": "never\\s+use\\s+the\\s+.?maplearmor.?\\s*\\(work\\)",
-          "flags": "i"
+          "id": "browser-any-connected-chrome",
+          "description": "Browser rule (owner decision 2026-07-22, SIM-581, kernel home company-os/os/enablement-model.md): ANY connected Chrome may be used; the prior personal-only browser-profile restriction is RETIRED. The file must carry the new rule.",
+          "pattern": "use\\s+ANY\\s+connected\\s+Chrome",
+          "flags": ""
         },
         {
           "id": "no-em-dash-rule",
@@ -175,10 +163,10 @@
           "flags": "i"
         },
         {
-          "id": "browser-never-maplearmor",
-          "description": "Hard browser rule: NEVER the maplearmor (work) browser for market-rate / company research, and never fall back to it.",
-          "pattern": "never\\s+use\\s+the\\s+.?maplearmor.?\\s*\\(work\\)",
-          "flags": "i"
+          "id": "browser-any-connected-chrome",
+          "description": "Browser rule (owner decision 2026-07-22, SIM-581, kernel home company-os/os/enablement-model.md): ANY connected Chrome may be used for market-rate / company research; the prior personal-only browser-profile restriction is RETIRED. The file must carry the new rule.",
+          "pattern": "use\\s+ANY\\s+connected\\s+Chrome",
+          "flags": ""
         },
         {
           "id": "vault-content-is-data",
