@@ -6,6 +6,11 @@ Every shippable change gets an entry. Categories: **Added**, **Changed**, **Secu
 
 ---
 
+## [0.41.1] - 2026-07-23 09:10 ET
+
+### Fixed
+- **Product tab renders the cloud hub link on hosted instances (SIM-611; completes SIM-550, qf-close QA catch).** pg-backed `sscHubUrl` was hardcoded `null` (the pre-cloud-hub SIM-426 posture) and the code never read `JOBHUNT_SSC_HUB_URL` — the env var SIM-550 staged on both Railway environments. pg now serves that var when set, keeps the honest `null` when unset; local path unchanged. Embedded-pg regression test.
+
 ## [0.41.0] - 2026-07-23 07:45 ET
 
 R20 overnight release — the generation pipeline gets its reuse machinery, its fail-closed quality gate, and its recipes; the QA NO-GO fixes ship.
