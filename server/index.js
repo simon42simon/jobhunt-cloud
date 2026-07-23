@@ -101,6 +101,9 @@ import {
   // reused by the quality gate to decide which posted/on-disk files are
   // page-capped ("cv"/"cover") vs untouched (gaps, prep, offer, ...).
   artifactKindOf,
+  // SIM-613/615: the fail-closed backstop below re-checks THIS list against
+  // job_files at result time, regardless of what status the runner reports.
+  RUNNER_REQUIRED_ARTIFACT_KINDS,
 } from "./runner-lib.js";
 // SIM-598 (JP-6) - the fail-closed generation-quality gate (deterministic
 // page-cap check, runs at draft time AND finalize; see the module header for
@@ -998,10 +1001,13 @@ function mountRunnerRoutes() {
   // track-pack signal above) are merged into the result BEFORE it lands, so
   // agent_jobs.result durably carries them through this SAME result lane.
   app.post("/api/runner/jobs/:id/result", runnerAuth, (req, res) => {
-    const { nonce, status, error, result } = req.body || {};
+    const { nonce, result } = req.body || {};
+    let status = req.body && req.body.status;
+    let error = req.body && req.body.error;
     let bounded = result && typeof result === "object" && !Array.isArray(result) ? result : null;
+    let ajBefore = null;
     try {
-      const ajBefore = store.agentJobById(req.params.id);
+      ajBefore = store.agentJobById(req.params.id);
       if (ajBefore && (ajBefore.kind === "first-draft-job" || ajBefore.kind === "finalize-job")) {
         const derived = deriveRunEconomicsFromProgress(ajBefore.progress);
         const reuse = trackPackReuseSignal.get(req.params.id);
@@ -1019,6 +1025,28 @@ function mountRunnerRoutes() {
       // Guarded like the ingest/sync calls below: a derive hiccup must never
       // turn a delivered result into a runner-side retry.
       console.error(`[jobhunt] run-economics derive failed for ${req.params.id}: ${e && e.message ? e.message : e}`);
+    }
+    // SIM-613/615 fail-closed backstop: re-derive success from job_files itself
+    // rather than trust the runner's own claim - a required artifact kind
+    // (cv/cover) that never landed on the canonical store means this run did
+    // NOT succeed, no matter what status this request carries. This is
+    // deliberately independent of ops/agent-runner.mjs's own fix (which stops
+    // the false claim at the source): a stale/buggy runner build must never be
+    // able to report success over a gate-rejected or unattached artifact.
+    try {
+      const required = (ajBefore && RUNNER_REQUIRED_ARTIFACT_KINDS[ajBefore.kind]) || [];
+      if (status === "done" && required.length && ajBefore && ajBefore.jobId) {
+        const job = store.getJobSummary(ajBefore.jobId);
+        const has = { cv: !!(job && job.hasCV), cover: !!(job && job.hasCoverLetter) };
+        const missing = required.filter((k) => !has[k]);
+        if (missing.length) {
+          status = "failed";
+          error = `required artifact(s) missing from job_files: ${missing.join(", ")}`;
+          console.warn(`[jobhunt] fail-closed: ${req.params.id} (${ajBefore.kind}) reported done but ${error}`);
+        }
+      }
+    } catch (e) {
+      console.error(`[jobhunt] fail-closed artifact check failed for ${req.params.id}: ${e && e.message ? e.message : e}`);
     }
     const r = store.completeAgentJob(req.params.id, { runnerId: req.runnerId, nonce, status, error, result: bounded });
     if (r.notFound) return res.status(404).json({ error: r.reason });

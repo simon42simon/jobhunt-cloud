@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { collectOutputs, snapshotFolder } from "../ops/agent-runner.mjs";
+import { collectOutputs, snapshotFolder, resolveRunOutcome } from "../ops/agent-runner.mjs";
 
 let dir;
 beforeEach(() => {
@@ -48,6 +48,49 @@ describe("collectOutputs (MF-2 bounded egress from the job folder)", () => {
     expect(draft).toContain("gaps.md");
     const fin = collectOutputs("finalize-job", dir, before).map((o) => o.name);
     expect(fin).not.toContain("gaps.md");
+  });
+});
+
+// SIM-613/615 - resolveRunOutcome is the runner's own fail-closed decision: an
+// exit-0 claude process is NOT "the run succeeded" when a required artifact
+// kind (cv/cover) never landed. This is the exact swallowed-400 SIM-613 named
+// (agent-runner.mjs used to report "done" unconditionally on exit 0 - see
+// tests/runner-fail-closed-result.test.js for the server-side backstop that
+// catches this same failure mode independently of the runner's own build).
+describe("resolveRunOutcome (SIM-613/615 fail-closed run result)", () => {
+  it("a non-zero exit always fails, regardless of what posted", () => {
+    const out = resolveRunOutcome("first-draft-job", 1, "spawn failed: ENOENT", new Set(["cv", "cover"]), []);
+    expect(out.status).toBe("failed");
+    expect(out.error).toBe("spawn failed: ENOENT");
+  });
+
+  it("exit 0 with every required kind posted reports done", () => {
+    const out = resolveRunOutcome("first-draft-job", 0, null, new Set(["cv", "cover"]), []);
+    expect(out).toEqual({ status: "done", error: null });
+  });
+
+  it("exit 0 but a required kind (cv) rejected by the gate reports failed, carrying the reason (the SIM-613 repro)", () => {
+    const out = resolveRunOutcome(
+      "first-draft-job",
+      0,
+      null,
+      new Set(["cover"]), // only the cover letter actually landed
+      ["CV - Analyst.docx (cv): rejected 400 - CV exceeds the 2-page cap"],
+    );
+    expect(out.status).toBe("failed");
+    expect(out.error).toMatch(/cv/);
+    expect(out.error).toMatch(/2-page cap/);
+  });
+
+  it("exit 0 but a required kind never even attempted (missing from postedKinds, no failure logged) still reports failed", () => {
+    const out = resolveRunOutcome("finalize-job", 0, null, new Set(["cv"]), []);
+    expect(out.status).toBe("failed");
+    expect(out.error).toMatch(/cover/);
+  });
+
+  it("a kind with no required list (interview-prep) always reports done on exit 0, regardless of what posted", () => {
+    const out = resolveRunOutcome("interview-prep", 0, null, new Set(), []);
+    expect(out).toEqual({ status: "done", error: null });
   });
 });
 
